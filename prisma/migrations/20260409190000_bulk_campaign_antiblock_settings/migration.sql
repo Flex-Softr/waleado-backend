@@ -1,0 +1,16 @@
+-- CreateEnum
+CREATE TYPE "BulkUniquenessMode" AS ENUM ('NONE', 'CAMPAIGN', 'WORKSPACE_WINDOW');
+
+-- AlterTable
+ALTER TABLE "BulkCampaign"
+ADD COLUMN "antiBlockEnabled" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "spintaxEnabled" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "verifyNumbers" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "repliedOnly" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "recent24hOnly" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "uniquenessMode" "BulkUniquenessMode" NOT NULL DEFAULT 'NONE',
+ADD COLUMN "batchPauseEvery" INTEGER NOT NULL DEFAULT 30,
+ADD COLUMN "batchPauseSec" INTEGER NOT NULL DEFAULT 30,
+ADD COLUMN "failLimitInRow" INTEGER NOT NULL DEFAULT 5,
+ADD COLUMN "activeHoursStart" TEXT,
+ADD COLUMN "activeHoursEnd" TEXT;
