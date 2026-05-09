@@ -13,6 +13,8 @@ export type BulkAntiBlockSettings = {
   failLimitInRow: number;
   activeHoursStart: string | null;
   activeHoursEnd: string | null;
+  inactiveHoursStart: string | null;
+  inactiveHoursEnd: string | null;
 };
 
 export function parseTimeToMinute(input: string): number | null {
@@ -34,6 +36,35 @@ export function isWithinActiveHours(
   if (s === e) return true;
   if (s < e) return cur >= s && cur <= e;
   return cur >= s || cur <= e;
+}
+
+export function isWithinInactiveHours(
+  now: Date,
+  start: string | null,
+  end: string | null
+): boolean {
+  if (!start || !end) return false;
+  return isWithinActiveHours(now, start, end);
+}
+
+export function canSendAt(
+  now: Date,
+  settings: Pick<
+    BulkAntiBlockSettings,
+    "activeHoursStart" | "activeHoursEnd" | "inactiveHoursStart" | "inactiveHoursEnd"
+  >
+): boolean {
+  const inActive = isWithinActiveHours(
+    now,
+    settings.activeHoursStart,
+    settings.activeHoursEnd
+  );
+  if (!inActive) return false;
+  return !isWithinInactiveHours(
+    now,
+    settings.inactiveHoursStart,
+    settings.inactiveHoursEnd
+  );
 }
 
 export function applySpintax(input: string): string {
@@ -165,6 +196,8 @@ export function normalizeAntiBlock(
     failLimitInRow?: number;
     activeHoursStart?: string | null;
     activeHoursEnd?: string | null;
+    inactiveHoursStart?: string | null;
+    inactiveHoursEnd?: string | null;
   } | null
 ): BulkAntiBlockSettings {
   const uniquenessMode =
@@ -185,6 +218,8 @@ export function normalizeAntiBlock(
     failLimitInRow: Math.max(1, Math.floor(antiBlock?.failLimitInRow ?? 5)),
     activeHoursStart: antiBlock?.activeHoursStart?.trim() || null,
     activeHoursEnd: antiBlock?.activeHoursEnd?.trim() || null,
+    inactiveHoursStart: antiBlock?.inactiveHoursStart?.trim() || null,
+    inactiveHoursEnd: antiBlock?.inactiveHoursEnd?.trim() || null,
   };
 }
 
@@ -200,6 +235,8 @@ export function antiBlockApiFromRow(row: {
   failLimitInRow: number;
   activeHoursStart: string | null;
   activeHoursEnd: string | null;
+  inactiveHoursStart: string | null;
+  inactiveHoursEnd: string | null;
 }) {
   return {
     enabled: row.antiBlockEnabled,
@@ -218,6 +255,8 @@ export function antiBlockApiFromRow(row: {
     failLimitInRow: row.failLimitInRow,
     activeHoursStart: row.activeHoursStart,
     activeHoursEnd: row.activeHoursEnd,
+    inactiveHoursStart: row.inactiveHoursStart,
+    inactiveHoursEnd: row.inactiveHoursEnd,
   } as const;
 }
 

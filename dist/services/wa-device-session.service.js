@@ -45,6 +45,7 @@ exports.getWaStartError = getWaStartError;
 exports.getOpenWaSocket = getOpenWaSocket;
 exports.waitForOpenWaSocket = waitForOpenWaSocket;
 exports.resolveOpenWaSocketForWorkspace = resolveOpenWaSocketForWorkspace;
+exports.ensureConnectedWaSessionsOnStartup = ensureConnectedWaSessionsOnStartup;
 exports.ensureWaDeviceSession = ensureWaDeviceSession;
 exports.stopWaDeviceSession = stopWaDeviceSession;
 const fs_1 = __importDefault(require("fs"));
@@ -55,6 +56,7 @@ const client_1 = require("@prisma/client");
 const env_1 = require("../env");
 const prisma_1 = require("../lib/prisma");
 const auto_reply_inbound_service_1 = require("./auto_reply_inbound.service");
+const chatbot_inbound_service_1 = require("./chatbot_inbound.service");
 const live_chat_inbound_ingest_service_1 = require("./live_chat_inbound_ingest.service");
 /** Repo root: `server/src/services` → `../../../` */
 const REPO_ROOT = path_1.default.resolve(__dirname, "../../..");
@@ -249,6 +251,31 @@ async function resolveOpenWaSocketForWorkspace(workspaceId, options) {
     return null;
 }
 /**
+ * Rehydrates Baileys sessions for devices already marked CONNECTED in DB.
+ * This ensures inbound listeners (live chat + auto-reply) are attached after API restart.
+ */
+async function ensureConnectedWaSessionsOnStartup() {
+    if (!env_1.env.WHATSAPP_BRIDGE_ENABLED) {
+        return;
+    }
+    const connected = await prisma_1.prisma.device.findMany({
+        where: { status: client_1.DeviceStatus.CONNECTED },
+        select: { id: true, workspaceId: true },
+        orderBy: { updatedAt: "desc" },
+    });
+    if (connected.length === 0) {
+        return;
+    }
+    await Promise.all(connected.map(async (d) => {
+        try {
+            await ensureWaDeviceSession(d.id, d.workspaceId);
+        }
+        catch (err) {
+            console.error(`[wa-session] startup restore failed for device ${d.id}`, err);
+        }
+    }));
+}
+/**
  * Starts (or reuses) a Baileys WhatsApp Web socket for this device so the UI can show a real scan QR.
  */
 async function ensureWaDeviceSession(deviceId, workspaceId) {
@@ -399,6 +426,12 @@ async function ensureWaDeviceSession(deviceId, workspaceId) {
                 }
                 catch (err) {
                     console.error("[wa-session] auto-reply handler error", err);
+                }
+                try {
+                    await (0, chatbot_inbound_service_1.dispatchChatbotFlowForInbound)(deviceId, workspaceId, sock, messages, extractMessageContent, type);
+                }
+                catch (err) {
+                    console.error("[wa-session] chatbot handler error", err);
                 }
             });
         }

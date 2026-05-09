@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseTimeToMinute = parseTimeToMinute;
 exports.isWithinActiveHours = isWithinActiveHours;
+exports.isWithinInactiveHours = isWithinInactiveHours;
+exports.canSendAt = canSendAt;
 exports.applySpintax = applySpintax;
 exports.applyUniqueness = applyUniqueness;
 exports.applyWorkspaceUniquenessWindow = applyWorkspaceUniquenessWindow;
@@ -36,6 +38,17 @@ function isWithinActiveHours(now, start, end) {
     if (s < e)
         return cur >= s && cur <= e;
     return cur >= s || cur <= e;
+}
+function isWithinInactiveHours(now, start, end) {
+    if (!start || !end)
+        return false;
+    return isWithinActiveHours(now, start, end);
+}
+function canSendAt(now, settings) {
+    const inActive = isWithinActiveHours(now, settings.activeHoursStart, settings.activeHoursEnd);
+    if (!inActive)
+        return false;
+    return !isWithinInactiveHours(now, settings.inactiveHoursStart, settings.inactiveHoursEnd);
 }
 function applySpintax(input) {
     const maxRounds = 10;
@@ -153,6 +166,8 @@ function normalizeAntiBlock(antiBlock) {
         failLimitInRow: Math.max(1, Math.floor(antiBlock?.failLimitInRow ?? 5)),
         activeHoursStart: antiBlock?.activeHoursStart?.trim() || null,
         activeHoursEnd: antiBlock?.activeHoursEnd?.trim() || null,
+        inactiveHoursStart: antiBlock?.inactiveHoursStart?.trim() || null,
+        inactiveHoursEnd: antiBlock?.inactiveHoursEnd?.trim() || null,
     };
 }
 function antiBlockApiFromRow(row) {
@@ -172,6 +187,8 @@ function antiBlockApiFromRow(row) {
         failLimitInRow: row.failLimitInRow,
         activeHoursStart: row.activeHoursStart,
         activeHoursEnd: row.activeHoursEnd,
+        inactiveHoursStart: row.inactiveHoursStart,
+        inactiveHoursEnd: row.inactiveHoursEnd,
     };
 }
 async function applyPhoneFilters(workspaceId, phones, settings) {

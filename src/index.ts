@@ -1,6 +1,7 @@
 import { env } from "./env";
 import { app } from "./app";
 import { startBulkCampaignScheduledWorker } from "./services/bulk_campaigns.service";
+import { ensureConnectedWaSessionsOnStartup } from "./services/wa-device-session.service";
 
 const port = env.PORT;
 
@@ -10,4 +11,5 @@ app.listen(port, () => {
     `[whatsapp] bridge ${env.WHATSAPP_BRIDGE_ENABLED ? "ENABLED (real QR + send)" : "DISABLED (outbound simulated)"}`
   );
   startBulkCampaignScheduledWorker();
+  void ensureConnectedWaSessionsOnStartup();
 });

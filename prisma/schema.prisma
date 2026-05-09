@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  binaryTargets = ["native", "windows"]
 }
 
 datasource db {
@@ -46,6 +47,8 @@ enum BulkCampaignStatus {
   SCHEDULED
   COMPLETED
   FAILED
+  PENDING
+  RUNNING
 }
 
 enum BulkSelectionMode {
@@ -384,6 +387,8 @@ model BulkCampaign {
   failLimitInRow   Int                @default(5)
   activeHoursStart String?
   activeHoursEnd   String?
+  inactiveHoursStart String?
+  inactiveHoursEnd String?
   status           BulkCampaignStatus @default(SCHEDULED)
   outboundMessages OutboundMessage[]
 
