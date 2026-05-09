@@ -239,7 +239,12 @@ function selectRuleToExecute(rules, inboundText) {
         if (currentPriority === null)
             currentPriority = rule.priority;
         if (rule.priority !== currentPriority) {
-            return best ? { rule: best.rule, matchedKeyword: best.matchedKeyword } : null;
+            // Lowest-number priority group wins, but only if that group has a match.
+            // If no rule matched in this group, continue to the next priority.
+            if (best) {
+                return { rule: best.rule, matchedKeyword: best.matchedKeyword };
+            }
+            currentPriority = rule.priority;
         }
         const triggerType = rule.triggerType;
         const matched = (0, auto_reply_keywords_1.matchAutoReplyTriggers)(inboundText, {

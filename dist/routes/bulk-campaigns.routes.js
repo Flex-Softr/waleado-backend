@@ -87,6 +87,16 @@ const createBody = zod_1.z
             .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
             .optional()
             .nullable(),
+        inactiveHoursStart: zod_1.z
+            .string()
+            .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+            .optional()
+            .nullable(),
+        inactiveHoursEnd: zod_1.z
+            .string()
+            .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+            .optional()
+            .nullable(),
     })
         .optional(),
 })
@@ -144,6 +154,18 @@ const createBody = zod_1.z
                 code: zod_1.z.ZodIssueCode.custom,
                 message: "Both active-hours start and end are required",
                 path: ["antiBlock", hasStart ? "activeHoursEnd" : "activeHoursStart"],
+            });
+        }
+        const hasInactiveStart = Boolean(data.antiBlock.inactiveHoursStart?.trim());
+        const hasInactiveEnd = Boolean(data.antiBlock.inactiveHoursEnd?.trim());
+        if (hasInactiveStart !== hasInactiveEnd) {
+            ctx.addIssue({
+                code: zod_1.z.ZodIssueCode.custom,
+                message: "Both inactive-hours start and end are required",
+                path: [
+                    "antiBlock",
+                    hasInactiveStart ? "inactiveHoursEnd" : "inactiveHoursStart",
+                ],
             });
         }
     }

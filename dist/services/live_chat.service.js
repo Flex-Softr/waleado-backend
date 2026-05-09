@@ -82,6 +82,10 @@ function threadToJson(t) {
         updatedAt: t.updatedAt.toISOString(),
     };
 }
+function normalizePhoneForMatch(phone) {
+    const digits = phone.replace(/\D+/g, "");
+    return digits.startsWith("00") ? digits.slice(2) : digits;
+}
 async function syncThreadsFromOutbound(workspaceId, deviceId) {
     const device = await prisma_1.prisma.device.findFirst({
         where: { id: deviceId, workspaceId },
@@ -138,7 +142,47 @@ async function listLiveChatThreads(workspaceId, deviceId) {
         include: { device: { select: { name: true } } },
         orderBy: [{ lastMessageAt: "desc" }, { updatedAt: "desc" }],
     });
-    return rows.map(threadToJson);
+    if (rows.length === 0)
+        return [];
+    const peerPhones = [...new Set(rows.map((r) => r.peerPhone))];
+    const savedContacts = await prisma_1.prisma.contact.findMany({
+        where: {
+            group: { workspaceId },
+        },
+        orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+        select: { phone: true, name: true },
+    });
+    const savedNameByPhone = new Map();
+    for (const c of savedContacts) {
+        const normalized = normalizePhoneForMatch(c.phone);
+        const name = c.name.trim();
+        if (!normalized || !name || savedNameByPhone.has(normalized))
+            continue;
+        savedNameByPhone.set(normalized, name);
+    }
+    return rows.map((row) => {
+        const json = threadToJson(row);
+        const normalizedPeer = normalizePhoneForMatch(row.peerPhone);
+        let savedName = savedNameByPhone.get(normalizedPeer);
+        if (!savedName && normalizedPeer) {
+            let bestLen = -1;
+            for (const [savedPhone, candidateName] of savedNameByPhone) {
+                if (normalizedPeer.endsWith(savedPhone) ||
+                    savedPhone.endsWith(normalizedPeer)) {
+                    if (savedPhone.length > bestLen) {
+                        bestLen = savedPhone.length;
+                        savedName = candidateName;
+                    }
+                }
+            }
+        }
+        if (!savedName)
+            return json;
+        return {
+            ...json,
+            displayTitle: savedName,
+        };
+    });
 }
 async function createLiveChatThread(workspaceId, input) {
     const phone = (0, phone_1.validateAndFormatPhone)(input.peerPhone);

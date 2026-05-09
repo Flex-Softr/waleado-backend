@@ -53,6 +53,16 @@ const createBody = z
           .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
           .optional()
           .nullable(),
+        inactiveHoursStart: z
+          .string()
+          .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+          .optional()
+          .nullable(),
+        inactiveHoursEnd: z
+          .string()
+          .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+          .optional()
+          .nullable(),
       })
       .optional(),
   })
@@ -118,6 +128,18 @@ const createBody = z
           path: ["antiBlock", hasStart ? "activeHoursEnd" : "activeHoursStart"],
         });
       }
+      const hasInactiveStart = Boolean(data.antiBlock.inactiveHoursStart?.trim());
+      const hasInactiveEnd = Boolean(data.antiBlock.inactiveHoursEnd?.trim());
+      if (hasInactiveStart !== hasInactiveEnd) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Both inactive-hours start and end are required",
+          path: [
+            "antiBlock",
+            hasInactiveStart ? "inactiveHoursEnd" : "inactiveHoursStart",
+          ],
+        });
+      }
     }
   });
 
@@ -136,12 +158,25 @@ function asyncHandler(
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const auth = req.auth;
-    if (!auth) {
-      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    try {
+      const auth = req.auth;
+
+      if (!auth) {
+        throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+      }
+
+    //  console.log("AUTH:", auth);
+
+      const list = await bulkCampaigns.listBulkCampaigns(auth.wid);
+
+      res.json({ campaigns: list });
+    } catch (error) {
+    //  console.error("Bulk campaigns error:", error);
+
+      res.status(500).json({
+        message: (error as Error).message ?? "Internal server error",
+      });
     }
-    const list = await bulkCampaigns.listBulkCampaigns(auth.wid);
-    res.json({ campaigns: list });
   })
 );
 

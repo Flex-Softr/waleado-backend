@@ -8,6 +8,7 @@ import { DeviceStatus } from "@prisma/client";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
 import { dispatchAutoRepliesForInbound } from "./auto_reply_inbound.service";
+import { dispatchChatbotFlowForInbound } from "./chatbot_inbound.service";
 import { ingestInboundLiveChatMessages } from "./live_chat_inbound_ingest.service";
 
 /** Repo root: `server/src/services` → `../../../` */
@@ -260,6 +261,36 @@ export async function resolveOpenWaSocketForWorkspace(
 }
 
 /**
+ * Rehydrates Baileys sessions for devices already marked CONNECTED in DB.
+ * This ensures inbound listeners (live chat + auto-reply) are attached after API restart.
+ */
+export async function ensureConnectedWaSessionsOnStartup(): Promise<void> {
+  if (!env.WHATSAPP_BRIDGE_ENABLED) {
+    return;
+  }
+
+  const connected = await prisma.device.findMany({
+    where: { status: DeviceStatus.CONNECTED },
+    select: { id: true, workspaceId: true },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  if (connected.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    connected.map(async (d) => {
+      try {
+        await ensureWaDeviceSession(d.id, d.workspaceId);
+      } catch (err) {
+        console.error(`[wa-session] startup restore failed for device ${d.id}`, err);
+      }
+    })
+  );
+}
+
+/**
  * Starts (or reuses) a Baileys WhatsApp Web socket for this device so the UI can show a real scan QR.
  */
 export async function ensureWaDeviceSession(
@@ -458,6 +489,18 @@ export async function ensureWaDeviceSession(
           );
         } catch (err) {
           console.error("[wa-session] auto-reply handler error", err);
+        }
+        try {
+          await dispatchChatbotFlowForInbound(
+            deviceId,
+            workspaceId,
+            sock,
+            messages,
+            extractMessageContent,
+            type
+          );
+        } catch (err) {
+          console.error("[wa-session] chatbot handler error", err);
         }
       });
     } catch (e) {

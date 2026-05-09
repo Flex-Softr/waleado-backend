@@ -25,7 +25,7 @@ import {
   antiBlockApiFromRow,
   applyPhoneFilters,
   applySpintax,
-  isWithinActiveHours,
+  canSendAt,
   normalizeAntiBlock,
   randomDelayMs,
   shouldStopByFailLimit,
@@ -110,13 +110,15 @@ export type CreateBulkCampaignPayload = {
     failLimitInRow?: number;
     activeHoursStart?: string | null;
     activeHoursEnd?: string | null;
+    inactiveHoursStart?: string | null;
+    inactiveHoursEnd?: string | null;
   };
 };
 
 export type BulkCampaignListItemJson = {
   id: string;
   name: string;
-  status: "scheduled" | "completed" | "failed";
+  status: "scheduled" | "completed" | "failed" | "pending" | "running";
   kind: "text" | "template";
   selectionMode: "groups" | "all_verified" | "manual";
   deviceMode: "single" | "failover" | "round_robin";
@@ -141,6 +143,8 @@ export type BulkCampaignListItemJson = {
     failLimitInRow: number;
     activeHoursStart: string | null;
     activeHoursEnd: string | null;
+    inactiveHoursStart: string | null;
+    inactiveHoursEnd: string | null;
   };
   createdAt: string;
   updatedAt: string;
@@ -397,6 +401,8 @@ export async function getBulkCampaignDetail(
       failLimitInRow: campaign.failLimitInRow,
       activeHoursStart: campaign.activeHoursStart,
       activeHoursEnd: campaign.activeHoursEnd,
+      inactiveHoursStart: campaign.inactiveHoursStart,
+      inactiveHoursEnd: campaign.inactiveHoursEnd,
       createdAt: campaign.createdAt,
       updatedAt: campaign.updatedAt,
     }),
@@ -468,6 +474,8 @@ function toListItem(row: {
   failLimitInRow: number;
   activeHoursStart: string | null;
   activeHoursEnd: string | null;
+  inactiveHoursStart: string | null;
+  inactiveHoursEnd: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): BulkCampaignListItemJson {
@@ -717,7 +725,7 @@ export async function createBulkCampaign(
 
   const initialStatus =
     scheduleType === BulkScheduleType.IMMEDIATE
-      ? BulkCampaignStatus.COMPLETED
+      ? BulkCampaignStatus.PENDING
       : BulkCampaignStatus.SCHEDULED;
 
   const campaign = await prisma.bulkCampaign.create({
@@ -755,33 +763,96 @@ export async function createBulkCampaign(
       failLimitInRow: antiBlock.failLimitInRow,
       activeHoursStart: antiBlock.activeHoursStart,
       activeHoursEnd: antiBlock.activeHoursEnd,
+      inactiveHoursStart: antiBlock.inactiveHoursStart,
+      inactiveHoursEnd: antiBlock.inactiveHoursEnd,
       status: initialStatus,
     },
   });
 
+  // let dispatched = 0;
+  // if (scheduleType === BulkScheduleType.IMMEDIATE) {
+  //   dispatched = await executeCampaignDispatch({
+  //     campaignId: campaign.id,
+  //     workspaceId,
+  //     phones,
+  //     deviceIds: payload.deviceIds,
+  //     deviceMode: deviceModeEnum,
+  //     kind,
+  //     bodyText,
+  //     templateId,
+  //     attachmentType,
+  //     attachmentAssetId,
+  //     delayMinSec: delayNorm.min,
+  //     delayMaxSec: delayNorm.max,
+  //     maxRetries: Math.max(0, payload.maxRetries),
+  //     antiBlock,
+  //   });
+  //   await prisma.bulkCampaign.update({
+  //     where: { id: campaign.id },
+  //     data: { status: BulkCampaignStatus.COMPLETED },
+  //   });
+  // }
+
   let dispatched = 0;
-  if (scheduleType === BulkScheduleType.IMMEDIATE) {
-    dispatched = await executeCampaignDispatch({
-      campaignId: campaign.id,
-      workspaceId,
-      phones,
-      deviceIds: payload.deviceIds,
-      deviceMode: deviceModeEnum,
-      kind,
-      bodyText,
-      templateId,
-      attachmentType,
-      attachmentAssetId,
-      delayMinSec: delayNorm.min,
-      delayMaxSec: delayNorm.max,
-      maxRetries: Math.max(0, payload.maxRetries),
-      antiBlock,
-    });
-    await prisma.bulkCampaign.update({
-      where: { id: campaign.id },
-      data: { status: BulkCampaignStatus.COMPLETED },
-    });
-  }
+
+if (scheduleType === BulkScheduleType.IMMEDIATE) {
+  // set pending first
+  await prisma.bulkCampaign.update({
+    where: { id: campaign.id },
+    data: {
+      status: BulkCampaignStatus.PENDING,
+    },
+  });
+
+  // background processing
+  setImmediate(async () => {
+    try {
+      await prisma.bulkCampaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: BulkCampaignStatus.RUNNING,
+        },
+      });
+
+      const total = await executeCampaignDispatch({
+        campaignId: campaign.id,
+        workspaceId,
+        phones,
+        deviceIds: payload.deviceIds,
+        deviceMode: deviceModeEnum,
+        kind,
+        bodyText,
+        templateId,
+        attachmentType,
+        attachmentAssetId,
+        delayMinSec: delayNorm.min,
+        delayMaxSec: delayNorm.max,
+        maxRetries: Math.max(0, payload.maxRetries),
+        antiBlock,
+      });
+
+      await prisma.bulkCampaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: BulkCampaignStatus.COMPLETED,
+        },
+      });
+
+      console.log(
+        `Campaign ${campaign.id} completed with ${total} messages`
+      );
+    } catch (error) {
+      console.error("Campaign execution failed:", error);
+
+      await prisma.bulkCampaign.update({
+        where: { id: campaign.id },
+        data: {
+          status: BulkCampaignStatus.FAILED,
+        },
+      });
+    }
+  });
+}
 
   const refreshed = await prisma.bulkCampaign.findUniqueOrThrow({
     where: { id: campaign.id },
@@ -844,6 +915,12 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
   let dispatched = 0;
   let consecutiveFailures = 0;
 
+  async function waitUntilSendAllowed(): Promise<void> {
+    while (antiBlock.enabled && !canSendAt(new Date(), antiBlock)) {
+      await sleepMs(30_000);
+    }
+  }
+
   const templateRow =
     kind === OutboundKind.TEMPLATE && templateId
       ? await prisma.messageTemplate.findFirst({
@@ -885,16 +962,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
   }
 
   for (let i = 0; i < phones.length; i++) {
-    if (
-      antiBlock.enabled &&
-      !isWithinActiveHours(
-        new Date(),
-        antiBlock.activeHoursStart,
-        antiBlock.activeHoursEnd
-      )
-    ) {
-      break;
-    }
+    await waitUntilSendAllowed();
     if (shouldStopByFailLimit(consecutiveFailures, antiBlock)) {
       break;
     }
@@ -1058,6 +1126,8 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
           failLimitInRow: campaign.failLimitInRow,
           activeHoursStart: campaign.activeHoursStart,
           activeHoursEnd: campaign.activeHoursEnd,
+          inactiveHoursStart: campaign.inactiveHoursStart,
+          inactiveHoursEnd: campaign.inactiveHoursEnd,
         }
       );
 
@@ -1087,6 +1157,8 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
           failLimitInRow: campaign.failLimitInRow,
           activeHoursStart: campaign.activeHoursStart,
           activeHoursEnd: campaign.activeHoursEnd,
+          inactiveHoursStart: campaign.inactiveHoursStart,
+          inactiveHoursEnd: campaign.inactiveHoursEnd,
         },
       });
       await prisma.bulkCampaign.update({
