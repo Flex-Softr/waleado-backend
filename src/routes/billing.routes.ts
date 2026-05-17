@@ -105,4 +105,16 @@ router.post(
   })
 );
 
+router.post(
+  "/stripe-portal",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const out = await billing.createStripeCustomerPortalSession(auth.wid);
+    res.json(out);
+  })
+);
+
 export { router as billingRouter };

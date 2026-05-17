@@ -114,3 +114,11 @@ router.post("/reset-to-free", asyncHandler(async (req, res) => {
     await billing.resetWorkspaceToFree(auth.wid);
     res.status(204).send();
 }));
+router.post("/stripe-portal", asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+        throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const out = await billing.createStripeCustomerPortalSession(auth.wid);
+    res.json(out);
+}));

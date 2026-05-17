@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
@@ -8,10 +9,24 @@ import {
   refreshSession,
   registerUser,
   getMeForUser,
+  signInOrRegisterGoogleUser,
 } from "../services/auth.service";
-import { setRefreshCookie, clearRefreshCookie, getRefreshCookieName } from "../lib/cookies";
+import {
+  setRefreshCookie,
+  clearRefreshCookie,
+  getRefreshCookieName,
+  setGoogleOAuthCookies,
+  readGoogleOAuthCookies,
+  clearGoogleOAuthCookies,
+} from "../lib/cookies";
+import { isSafeInternalPath } from "../lib/safe-redirect";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../lib/errors";
+import { env, isGoogleOAuthConfigured } from "../env";
+import {
+  buildGoogleAuthorizeUrl,
+  exchangeGoogleAuthCode,
+} from "../services/google-oauth.service";
 
 const router = Router();
 
@@ -65,6 +80,94 @@ router.post(
     const { rawRefresh, ...payload } = await registerUser(body);
     setRefreshCookie(res, rawRefresh);
     res.status(201).json(payload);
+  })
+);
+
+router.get(
+  "/google/start",
+  authLimiter,
+  asyncHandler(async (req, res) => {
+    const nextRaw =
+      typeof req.query.next === "string" ? req.query.next : undefined;
+    const next =
+      nextRaw && isSafeInternalPath(nextRaw) ? nextRaw : undefined;
+
+    const frontendBase = env.APP_PUBLIC_URL.replace(/\/$/, "");
+    if (!isGoogleOAuthConfigured()) {
+      clearGoogleOAuthCookies(res);
+      const q = new URLSearchParams({ error: "oauth_not_configured" });
+      res.redirect(`${frontendBase}/oauth/google/callback?${q}`);
+      return;
+    }
+
+    const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+    if (prior) {
+      await logoutSession(prior);
+    }
+
+    const state = randomBytes(24).toString("hex");
+    setGoogleOAuthCookies(res, state, next);
+    const url = buildGoogleAuthorizeUrl(state);
+    res.redirect(302, url);
+  })
+);
+
+router.get(
+  "/google/callback",
+  authLimiter,
+  asyncHandler(async (req, res) => {
+    const frontendBase = env.APP_PUBLIC_URL.replace(/\/$/, "");
+
+    const redirectError = (code: string) => {
+      clearGoogleOAuthCookies(res);
+      const q = new URLSearchParams({ error: code });
+      res.redirect(302, `${frontendBase}/oauth/google/callback?${q}`);
+    };
+
+    const oauthErr =
+      typeof req.query.error === "string" ? req.query.error : undefined;
+    if (oauthErr) {
+      redirectError(
+        oauthErr === "access_denied" ? "access_denied" : "oauth_failed"
+      );
+      return;
+    }
+
+    const code =
+      typeof req.query.code === "string" ? req.query.code : undefined;
+    const state =
+      typeof req.query.state === "string" ? req.query.state : undefined;
+    const { state: cookieState, next: cookieNext } =
+      readGoogleOAuthCookies(req);
+
+    if (!code || !state || !cookieState || state !== cookieState) {
+      redirectError("invalid_state");
+      return;
+    }
+
+    try {
+      const claims = await exchangeGoogleAuthCode(code);
+      const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+      if (prior) {
+        await logoutSession(prior);
+      }
+      const { rawRefresh } = await signInOrRegisterGoogleUser({
+        googleSub: claims.sub,
+        email: claims.email,
+        name: claims.name,
+      });
+      setRefreshCookie(res, rawRefresh);
+      clearGoogleOAuthCookies(res);
+      const q = new URLSearchParams({ ok: "1" });
+      if (cookieNext && isSafeInternalPath(cookieNext)) {
+        q.set("next", cookieNext);
+      }
+      res.redirect(302, `${frontendBase}/oauth/google/callback?${q}`);
+    } catch (err) {
+      const code =
+        err instanceof AppError ? err.code ?? "oauth_failed" : "oauth_failed";
+      redirectError(code);
+    }
   })
 );
 

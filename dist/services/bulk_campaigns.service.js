@@ -472,7 +472,7 @@ async function createBulkCampaign(workspaceId, payload) {
         attachmentAssetId = asset.id;
     }
     const initialStatus = scheduleType === client_1.BulkScheduleType.IMMEDIATE
-        ? client_1.BulkCampaignStatus.COMPLETED
+        ? client_1.BulkCampaignStatus.PENDING
         : client_1.BulkCampaignStatus.SCHEDULED;
     const campaign = await prisma_1.prisma.bulkCampaign.create({
         data: {
@@ -514,27 +514,80 @@ async function createBulkCampaign(workspaceId, payload) {
             status: initialStatus,
         },
     });
+    // let dispatched = 0;
+    // if (scheduleType === BulkScheduleType.IMMEDIATE) {
+    //   dispatched = await executeCampaignDispatch({
+    //     campaignId: campaign.id,
+    //     workspaceId,
+    //     phones,
+    //     deviceIds: payload.deviceIds,
+    //     deviceMode: deviceModeEnum,
+    //     kind,
+    //     bodyText,
+    //     templateId,
+    //     attachmentType,
+    //     attachmentAssetId,
+    //     delayMinSec: delayNorm.min,
+    //     delayMaxSec: delayNorm.max,
+    //     maxRetries: Math.max(0, payload.maxRetries),
+    //     antiBlock,
+    //   });
+    //   await prisma.bulkCampaign.update({
+    //     where: { id: campaign.id },
+    //     data: { status: BulkCampaignStatus.COMPLETED },
+    //   });
+    // }
     let dispatched = 0;
     if (scheduleType === client_1.BulkScheduleType.IMMEDIATE) {
-        dispatched = await executeCampaignDispatch({
-            campaignId: campaign.id,
-            workspaceId,
-            phones,
-            deviceIds: payload.deviceIds,
-            deviceMode: deviceModeEnum,
-            kind,
-            bodyText,
-            templateId,
-            attachmentType,
-            attachmentAssetId,
-            delayMinSec: delayNorm.min,
-            delayMaxSec: delayNorm.max,
-            maxRetries: Math.max(0, payload.maxRetries),
-            antiBlock,
-        });
+        // set pending first
         await prisma_1.prisma.bulkCampaign.update({
             where: { id: campaign.id },
-            data: { status: client_1.BulkCampaignStatus.COMPLETED },
+            data: {
+                status: client_1.BulkCampaignStatus.PENDING,
+            },
+        });
+        // background processing
+        setImmediate(async () => {
+            try {
+                await prisma_1.prisma.bulkCampaign.update({
+                    where: { id: campaign.id },
+                    data: {
+                        status: client_1.BulkCampaignStatus.RUNNING,
+                    },
+                });
+                const total = await executeCampaignDispatch({
+                    campaignId: campaign.id,
+                    workspaceId,
+                    phones,
+                    deviceIds: payload.deviceIds,
+                    deviceMode: deviceModeEnum,
+                    kind,
+                    bodyText,
+                    templateId,
+                    attachmentType,
+                    attachmentAssetId,
+                    delayMinSec: delayNorm.min,
+                    delayMaxSec: delayNorm.max,
+                    maxRetries: Math.max(0, payload.maxRetries),
+                    antiBlock,
+                });
+                await prisma_1.prisma.bulkCampaign.update({
+                    where: { id: campaign.id },
+                    data: {
+                        status: client_1.BulkCampaignStatus.COMPLETED,
+                    },
+                });
+                console.log(`Campaign ${campaign.id} completed with ${total} messages`);
+            }
+            catch (error) {
+                console.error("Campaign execution failed:", error);
+                await prisma_1.prisma.bulkCampaign.update({
+                    where: { id: campaign.id },
+                    data: {
+                        status: client_1.BulkCampaignStatus.FAILED,
+                    },
+                });
+            }
         });
     }
     const refreshed = await prisma_1.prisma.bulkCampaign.findUniqueOrThrow({

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerUser = registerUser;
 exports.loginUser = loginUser;
+exports.signInOrRegisterGoogleUser = signInOrRegisterGoogleUser;
 exports.refreshSession = refreshSession;
 exports.logoutSession = logoutSession;
 exports.logoutAllSessions = logoutAllSessions;
@@ -109,9 +110,66 @@ async function loginUser(input) {
     if (!user) {
         throw new errors_1.AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
     }
+    if (!user.passwordHash) {
+        throw new errors_1.AppError(401, "This account uses Google sign-in", "USE_GOOGLE_AUTH");
+    }
     const ok = await (0, password_1.verifyPassword)(input.password, user.passwordHash);
     if (!ok) {
         throw new errors_1.AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
+    }
+    const { response, rawRefresh } = await issueSession(user);
+    return { ...response, rawRefresh };
+}
+async function signInOrRegisterGoogleUser(input) {
+    const email = input.email.toLowerCase().trim();
+    let user = await prisma_1.prisma.user.findUnique({
+        where: { googleId: input.googleSub },
+    });
+    if (!user) {
+        user = await prisma_1.prisma.user.findUnique({ where: { email } });
+        if (user) {
+            if (user.googleId && user.googleId !== input.googleSub) {
+                throw new errors_1.AppError(409, "This email is linked to a different Google account", "GOOGLE_LINK_MISMATCH");
+            }
+            user = await prisma_1.prisma.user.update({
+                where: { id: user.id },
+                data: {
+                    googleId: input.googleSub,
+                    name: user.name ??
+                        (input.name?.trim() ? input.name.trim() : undefined),
+                },
+            });
+        }
+    }
+    if (!user) {
+        const slug = `ws-${(0, crypto_1.randomUUID)().replace(/-/g, "").slice(0, 12)}`;
+        const workspaceName = input.name?.trim()
+            ? `${input.name.trim()}'s workspace`
+            : "My workspace";
+        user = await prisma_1.prisma.$transaction(async (tx) => {
+            const u = await tx.user.create({
+                data: {
+                    email,
+                    passwordHash: null,
+                    googleId: input.googleSub,
+                    name: input.name?.trim() || null,
+                },
+            });
+            const ws = await tx.workspace.create({
+                data: {
+                    name: workspaceName,
+                    slug,
+                },
+            });
+            await tx.membership.create({
+                data: {
+                    userId: u.id,
+                    workspaceId: ws.id,
+                    role: "OWNER",
+                },
+            });
+            return u;
+        });
     }
     const { response, rawRefresh } = await issueSession(user);
     return { ...response, rawRefresh };

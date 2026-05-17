@@ -41,8 +41,19 @@ const envSchema = z.object({
   API_PUBLIC_URL: z.string().default("http://localhost:4000"),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  /**
+   * Monthly subscription line: Stripe `price_…` / `prod_…` (default price), or a positive decimal
+   * major amount (e.g. `29` or `29.99`) with `STRIPE_CURRENCY` (Checkout `price_data`, monthly).
+   */
   STRIPE_PRICE_PRO_MONTHLY: z.string().optional(),
   STRIPE_PRICE_BUSINESS_MONTHLY: z.string().optional(),
+  /**
+   * ISO currency for digit `STRIPE_PRICE_*` values (minor units: ×100 except [zero-decimal](https://stripe.com/docs/currencies#presentment-currencies)).
+   */
+  STRIPE_CURRENCY: z
+    .string()
+    .default("usd")
+    .transform((s) => s.trim().toLowerCase() || "usd"),
   /** SSLCommerz store credentials (sandbox vs live controlled by SSLCOMMERZ_SANDBOX). */
   SSLCOMMERZ_STORE_ID: z.string().optional(),
   SSLCOMMERZ_STORE_PASSWORD: z.string().optional(),
@@ -51,10 +62,22 @@ const envSchema = z.object({
     const s = String(v).trim().toLowerCase();
     return s !== "false" && s !== "0" && s !== "no" && s !== "off";
   }, z.boolean()),
-  /** Charge amounts for plan upgrades (same currency as SSLCOMMERZ_CURRENCY). */
+  /** List prices for Pro/Business (interpreted as USD when CONVERSION_RATE_USD_TO_BDT is set; otherwise in SSLCOMMERZ_CURRENCY). */
   SSLCOMMERZ_PRO_AMOUNT: z.string().default("29.00"),
   SSLCOMMERZ_BUSINESS_AMOUNT: z.string().default("79.00"),
   SSLCOMMERZ_CURRENCY: z.string().default("USD"),
+  /**
+   * When set, SSLCOMMERZ_*_AMOUNT values are treated as USD, multiplied by this rate,
+   * and SSLCommerz receives BDT (your fixed taka pricing, e.g. 29 × 120 = 3480 BDT).
+   * When unset, amounts are charged as-is in SSLCOMMERZ_CURRENCY (USD with no rate → gateway may show its own BDT estimate).
+   * Also reads CONVERTION_RATE_USD_TO_BDT when this key is empty.
+   */
+  CONVERSION_RATE_USD_TO_BDT: z.preprocess((v: unknown) => {
+    if (v !== undefined && v !== "" && v !== null) return v;
+    const typo = process.env.CONVERTION_RATE_USD_TO_BDT;
+    if (typo !== undefined && typo !== "" && typo !== null) return typo;
+    return undefined;
+  }, z.coerce.number().positive().optional()),
   /** Absolute or repo-relative folder for Baileys auth files (default: `<repo>/.wa-sessions`) */
   WA_SESSIONS_DIR: z.string().optional(),
   /**
@@ -89,6 +112,14 @@ const envSchema = z.object({
    * Other authenticated workspace admins see metrics for their JWT workspace only.
    */
   PLATFORM_OPERATOR_EMAILS: z.string().optional(),
+  /** Google OAuth2 (authorization code flow). Both required when enabling “Continue with Google”. */
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  /**
+   * Must match an authorized redirect URI in Google Cloud Console (no trailing slash).
+   * Defaults to `${API_PUBLIC_URL}/v1/auth/google/callback`.
+   */
+  GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -111,3 +142,15 @@ function loadEnv(): Env {
 }
 
 export const env = loadEnv();
+
+export function isGoogleOAuthConfigured(): boolean {
+  const id = env.GOOGLE_CLIENT_ID?.trim();
+  const secret = env.GOOGLE_CLIENT_SECRET?.trim();
+  return Boolean(id && secret);
+}
+
+export function getGoogleOAuthRedirectUri(): string {
+  const raw = env.GOOGLE_OAUTH_REDIRECT_URI?.trim();
+  if (raw) return raw.replace(/\/$/, "");
+  return `${env.API_PUBLIC_URL.replace(/\/$/, "")}/v1/auth/google/callback`;
+}
