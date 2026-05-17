@@ -143,9 +143,85 @@ export async function loginUser(input: {
   if (!user) {
     throw new AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
   }
+  if (!user.passwordHash) {
+    throw new AppError(
+      401,
+      "This account uses Google sign-in",
+      "USE_GOOGLE_AUTH"
+    );
+  }
   const ok = await verifyPassword(input.password, user.passwordHash);
   if (!ok) {
     throw new AppError(401, "Invalid email or password", "INVALID_CREDENTIALS");
+  }
+
+  const { response, rawRefresh } = await issueSession(user);
+  return { ...response, rawRefresh };
+}
+
+export async function signInOrRegisterGoogleUser(input: {
+  googleSub: string;
+  email: string;
+  name?: string | null;
+}): Promise<AuthResponse & { rawRefresh: string }> {
+  const email = input.email.toLowerCase().trim();
+
+  let user = await prisma.user.findUnique({
+    where: { googleId: input.googleSub },
+  });
+
+  if (!user) {
+    user = await prisma.user.findUnique({ where: { email } });
+    if (user) {
+      if (user.googleId && user.googleId !== input.googleSub) {
+        throw new AppError(
+          409,
+          "This email is linked to a different Google account",
+          "GOOGLE_LINK_MISMATCH"
+        );
+      }
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          googleId: input.googleSub,
+          name:
+            user.name ??
+            (input.name?.trim() ? input.name.trim() : undefined),
+        },
+      });
+    }
+  }
+
+  if (!user) {
+    const slug = `ws-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const workspaceName = input.name?.trim()
+      ? `${input.name.trim()}'s workspace`
+      : "My workspace";
+
+    user = await prisma.$transaction(async (tx) => {
+      const u = await tx.user.create({
+        data: {
+          email,
+          passwordHash: null,
+          googleId: input.googleSub,
+          name: input.name?.trim() || null,
+        },
+      });
+      const ws = await tx.workspace.create({
+        data: {
+          name: workspaceName,
+          slug,
+        },
+      });
+      await tx.membership.create({
+        data: {
+          userId: u.id,
+          workspaceId: ws.id,
+          role: "OWNER",
+        },
+      });
+      return u;
+    });
   }
 
   const { response, rawRefresh } = await issueSession(user);

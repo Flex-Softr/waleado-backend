@@ -176,12 +176,21 @@ function asyncHandler(fn) {
     };
 }
 router.get("/", asyncHandler(async (req, res) => {
-    const auth = req.auth;
-    if (!auth) {
-        throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+    try {
+        const auth = req.auth;
+        if (!auth) {
+            throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+        }
+        //  console.log("AUTH:", auth);
+        const list = await bulkCampaigns.listBulkCampaigns(auth.wid);
+        res.json({ campaigns: list });
     }
-    const list = await bulkCampaigns.listBulkCampaigns(auth.wid);
-    res.json({ campaigns: list });
+    catch (error) {
+        //  console.error("Bulk campaigns error:", error);
+        res.status(500).json({
+            message: error.message ?? "Internal server error",
+        });
+    }
 }));
 router.get("/:id", asyncHandler(async (req, res) => {
     const auth = req.auth;

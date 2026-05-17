@@ -25,6 +25,7 @@ const group_grabber_routes_1 = require("./routes/group-grabber.routes");
 const dashboard_routes_1 = require("./routes/dashboard.routes");
 const admin_routes_1 = require("./routes/admin.routes");
 const health_routes_1 = require("./routes/health.routes");
+const public_routes_1 = require("./routes/public.routes");
 const auth_routes_1 = require("./routes/auth.routes");
 const stripe_webhook_1 = require("./routes/stripe-webhook");
 const sslcommerz_callbacks_routes_1 = require("./routes/sslcommerz-callbacks.routes");
@@ -60,13 +61,15 @@ app.post("/v1/webhooks/stripe", express_1.default.raw({ type: "application/json"
     (0, stripe_webhook_1.stripeWebhookHandler)(req, res).catch(next);
 });
 app.use("/v1/webhooks/payments/sslcommerz", express_1.default.urlencoded({ extended: false }), sslcommerz_callbacks_routes_1.sslCommerzIpnRouter);
-app.use("/v1/payments/sslcommerz", sslcommerz_callbacks_routes_1.sslCommerzBrowserRouter);
+/** SSLCommerz may GET-redirect or POST form data to success/fail/cancel URLs — parse body when present. */
+app.use("/v1/payments/sslcommerz", express_1.default.urlencoded({ extended: false }), sslcommerz_callbacks_routes_1.sslCommerzBrowserRouter);
 app.use(express_1.default.json({ limit: env_1.env.HTTP_JSON_BODY_LIMIT }));
 app.use("/v1", (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store, private");
     next();
 });
 app.use(health_routes_1.healthRouter);
+app.use("/v1/public", public_routes_1.publicRouter);
 app.use("/v1/auth", auth_routes_1.authRouter);
 app.use("/v1/billing", billing_routes_1.billingRouter);
 app.use("/v1/devices", devices_routes_1.devicesRouter);

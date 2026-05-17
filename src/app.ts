@@ -19,6 +19,7 @@ import { groupGrabberRouter } from "./routes/group-grabber.routes";
 import { dashboardRouter } from "./routes/dashboard.routes";
 import { adminRouter } from "./routes/admin.routes";
 import { healthRouter } from "./routes/health.routes";
+import { publicRouter } from "./routes/public.routes";
 import { authRouter } from "./routes/auth.routes";
 import { stripeWebhookHandler } from "./routes/stripe-webhook";
 import {
@@ -77,7 +78,12 @@ app.use(
   express.urlencoded({ extended: false }),
   sslCommerzIpnRouter
 );
-app.use("/v1/payments/sslcommerz", sslCommerzBrowserRouter);
+/** SSLCommerz may GET-redirect or POST form data to success/fail/cancel URLs — parse body when present. */
+app.use(
+  "/v1/payments/sslcommerz",
+  express.urlencoded({ extended: false }),
+  sslCommerzBrowserRouter
+);
 
 app.use(express.json({ limit: env.HTTP_JSON_BODY_LIMIT }));
 
@@ -87,6 +93,7 @@ app.use("/v1", (_req, res, next) => {
 });
 
 app.use(healthRouter);
+app.use("/v1/public", publicRouter);
 app.use("/v1/auth", authRouter);
 app.use("/v1/billing", billingRouter);
 app.use("/v1/devices", devicesRouter);

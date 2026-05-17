@@ -101,5 +101,12 @@ export function planAmount(plan: Exclude<PlanIdApi, "free">): { amount: string; 
       "SSLCOMMERZ_CONFIG"
     );
   }
+
+  const rate = env.CONVERSION_RATE_USD_TO_BDT;
+  if (rate != null && Number.isFinite(rate) && rate > 0) {
+    const charge = n * rate;
+    return { amount: charge.toFixed(2), currency: "BDT" };
+  }
+
   return { amount: n.toFixed(2), currency };
 }

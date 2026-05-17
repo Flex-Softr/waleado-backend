@@ -1,11 +1,16 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getBillingForWorkspace = getBillingForWorkspace;
+exports.createStripeCustomerPortalSession = createStripeCustomerPortalSession;
 exports.applyDemoPlan = applyDemoPlan;
 exports.resetWorkspaceToFree = resetWorkspaceToFree;
 exports.confirmCheckoutSession = confirmCheckoutSession;
 exports.syncWorkspaceFromSubscription = syncWorkspaceFromSubscription;
 exports.handleSubscriptionDeleted = handleSubscriptionDeleted;
+const stripe_1 = __importDefault(require("stripe"));
 const client_1 = require("@prisma/client");
 const prisma_1 = require("../lib/prisma");
 const errors_1 = require("../lib/errors");
@@ -13,7 +18,11 @@ const env_1 = require("../env");
 const stripe_client_1 = require("../lib/stripe-client");
 const gateway_catalog_1 = require("../payments/gateway-catalog");
 const plan_mapping_1 = require("../lib/plan-mapping");
+const stripe_price_ref_1 = require("../payments/stripe/stripe-price-ref");
 const ACTIVE = new Set(["active", "trialing", "past_due"]);
+function appPublicBase() {
+    return env_1.env.APP_PUBLIC_URL.replace(/\/$/, "");
+}
 async function getBillingForWorkspace(workspaceId) {
     const ws = await prisma_1.prisma.workspace.findUnique({
         where: { id: workspaceId },
@@ -23,18 +32,66 @@ async function getBillingForWorkspace(workspaceId) {
             currentPeriodEnd: true,
             stripeCustomerId: true,
             stripeSubscriptionId: true,
+            lastPaymentGateway: true,
         },
     });
     if (!ws) {
         throw new errors_1.AppError(404, "Workspace not found", "NOT_FOUND");
     }
+    const stripePortalEligible = Boolean(ws.stripeCustomerId &&
+        ws.lastPaymentGateway === "stripe" &&
+        ws.stripeSubscriptionId);
     return {
         planId: (0, plan_mapping_1.planToApi)(ws.plan),
         subscriptionStatus: ws.subscriptionStatus,
         currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
         stripeConfigured: Boolean(env_1.env.STRIPE_SECRET_KEY),
+        stripePortalEligible,
         paymentGateways: (0, gateway_catalog_1.listPaymentGateways)(),
     };
+}
+/**
+ * Opens Stripe Customer Portal (cancel, payment method, invoices) for workspaces
+ * that subscribed through Stripe checkout.
+ */
+async function createStripeCustomerPortalSession(workspaceId) {
+    const stripe = (0, stripe_client_1.getStripe)();
+    if (!stripe) {
+        throw new errors_1.AppError(503, "Stripe is not configured", "STRIPE_NOT_CONFIGURED");
+    }
+    const ws = await prisma_1.prisma.workspace.findUnique({
+        where: { id: workspaceId },
+        select: {
+            stripeCustomerId: true,
+            lastPaymentGateway: true,
+            stripeSubscriptionId: true,
+        },
+    });
+    if (!ws?.stripeCustomerId) {
+        throw new errors_1.AppError(400, "No Stripe billing profile for this workspace. Complete a Stripe checkout first.", "STRIPE_NO_CUSTOMER");
+    }
+    if (ws.lastPaymentGateway !== "stripe" || !ws.stripeSubscriptionId) {
+        throw new errors_1.AppError(400, "The customer portal is only available for active Stripe subscriptions.", "STRIPE_PORTAL_UNSUPPORTED");
+    }
+    try {
+        const session = await stripe.billingPortal.sessions.create({
+            customer: ws.stripeCustomerId,
+            return_url: `${appPublicBase()}/billing`,
+        });
+        if (!session.url) {
+            throw new errors_1.AppError(500, "Portal session missing URL", "STRIPE_ERROR");
+        }
+        return { url: session.url };
+    }
+    catch (e) {
+        if (e instanceof errors_1.AppError)
+            throw e;
+        const msg = e instanceof stripe_1.default.errors.StripeError
+            ? e.message
+            : "Could not open Stripe billing portal";
+        console.error("[billing] stripe portal session", e);
+        throw new errors_1.AppError(502, `${msg} If this is a new account, enable the Customer Portal in the Stripe Dashboard (Settings → Billing → Customer portal).`, "STRIPE_PORTAL_FAILED");
+    }
 }
 async function applyDemoPlan(workspaceId, planId) {
     const plan = (0, plan_mapping_1.apiPaidPlanToDb)(planId);
@@ -135,7 +192,10 @@ async function syncWorkspaceFromSubscription(subscription) {
     }
     const item = subscription.items.data[0];
     const priceId = item?.price?.id;
-    const mappedPlan = priceId ? (0, plan_mapping_1.priceIdToPlan)(priceId) : null;
+    const stripe = (0, stripe_client_1.getStripe)();
+    const mappedPlan = priceId && stripe
+        ? await (0, stripe_price_ref_1.matchSubscriptionPriceToPlan)(stripe, priceId)
+        : null;
     const plan = mappedPlan ??
         (subscription.metadata?.planId === "business"
             ? client_1.Plan.BUSINESS
