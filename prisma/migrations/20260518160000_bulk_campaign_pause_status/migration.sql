@@ -1,0 +1,1 @@
+ALTER TYPE "BulkCampaignStatus" ADD VALUE IF NOT EXISTS 'PAUSED';
