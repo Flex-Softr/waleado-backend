@@ -49,6 +49,7 @@ enum BulkCampaignStatus {
   FAILED
   PENDING
   RUNNING
+  PAUSED
 }
 
 enum BulkSelectionMode {

@@ -231,3 +231,39 @@ router.post("/", asyncHandler(async (req, res) => {
     });
     res.status(201).json(out);
 }));
+router.patch("/:id/pause", asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+        throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+        throw new errors_1.AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const campaign = await bulkCampaigns.pauseBulkCampaign(auth.wid, parsed.data);
+    res.json({ campaign });
+}));
+router.patch("/:id/resume", asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+        throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+        throw new errors_1.AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const campaign = await bulkCampaigns.resumeBulkCampaign(auth.wid, parsed.data);
+    res.json({ campaign });
+}));
+router.delete("/:id", asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+        throw new errors_1.AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+        throw new errors_1.AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    await bulkCampaigns.deleteBulkCampaign(auth.wid, parsed.data);
+    res.status(204).send();
+}));
