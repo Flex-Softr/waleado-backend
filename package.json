@@ -2,6 +2,9 @@
   "name": "flexowhats-api",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "node scripts/free-port.cjs 4000 && tsx watch src/index.ts",
     "build": "tsc",
