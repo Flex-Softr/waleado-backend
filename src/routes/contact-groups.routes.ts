@@ -24,6 +24,11 @@ const bulkContactsBody = z.object({
   lines: z.array(z.string().max(4096)).max(2000),
 });
 
+const exportContactsBody = z.object({
+  format: z.enum(["csv", "xlsx"]),
+  contactIds: z.array(z.string().uuid()).max(10000).optional(),
+});
+
 function asyncHandler(
   fn: (req: AuthedRequest, res: import("express").Response) => Promise<void>
 ) {
@@ -110,6 +115,25 @@ router.delete(
     const { groupId } = z.object({ groupId: z.string().uuid() }).parse(req.params);
     await contacts.deleteGroup(auth.wid, groupId);
     res.status(204).send();
+  })
+);
+
+router.post(
+  "/:groupId/contacts/export",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const { groupId } = z.object({ groupId: z.string().uuid() }).parse(req.params);
+    const body = exportContactsBody.parse(req.body);
+    const out = await contacts.exportGroupContacts(auth.wid, groupId, body);
+    res.setHeader("Content-Type", out.contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${out.filename}"`
+    );
+    res.send(out.body);
   })
 );
 

@@ -1,11 +1,17 @@
 import type { MembershipRole, User } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { hashRefreshToken, generateRefreshToken } from "../lib/crypto-token";
+import {
+  generatePasswordResetToken,
+  hashPasswordResetToken,
+  hashRefreshToken,
+  generateRefreshToken,
+} from "../lib/crypto-token";
 import { hashPassword, verifyPassword } from "../lib/password";
 import { signAccessToken } from "../lib/jwt";
 import { AppError } from "../lib/errors";
 import { env } from "../env";
 import { randomUUID } from "crypto";
+import { sendPasswordResetEmail } from "./mail.service";
 
 export type SafeUser = {
   id: string;
@@ -157,6 +163,102 @@ export async function loginUser(input: {
 
   const { response, rawRefresh } = await issueSession(user);
   return { ...response, rawRefresh };
+}
+
+export async function requestPasswordReset(input: {
+  email: string;
+}): Promise<{ ok: true; resetUrl?: string; emailDelivered?: boolean }> {
+  const email = input.email.toLowerCase().trim();
+  const user = await prisma.user.findUnique({ where: { email } });
+
+  if (!user || !user.passwordHash) {
+    return { ok: true };
+  }
+
+  await prisma.passwordResetToken.updateMany({
+    where: {
+      userId: user.id,
+      usedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { usedAt: new Date() },
+  });
+
+  const rawToken = generatePasswordResetToken();
+  await prisma.passwordResetToken.create({
+    data: {
+      userId: user.id,
+      hashedToken: hashPasswordResetToken(rawToken),
+      expiresAt: new Date(
+        Date.now() + env.PASSWORD_RESET_TOKEN_MINUTES * 60 * 1000
+      ),
+    },
+  });
+
+  const resetUrl = `${env.APP_PUBLIC_URL.replace(
+    /\/$/,
+    ""
+  )}/login?resetToken=${encodeURIComponent(rawToken)}`;
+  const mail = await sendPasswordResetEmail({
+    to: user.email,
+    resetUrl,
+    expiresMinutes: env.PASSWORD_RESET_TOKEN_MINUTES,
+  });
+
+  return {
+    ok: true,
+    ...(mail.delivered ? {} : { resetUrl }),
+    emailDelivered: mail.delivered,
+  };
+}
+
+export async function resetPassword(input: {
+  token: string;
+  password: string;
+}): Promise<{ ok: true }> {
+  const hashedToken = hashPasswordResetToken(input.token.trim());
+  const record = await prisma.passwordResetToken.findUnique({
+    where: { hashedToken },
+    include: { user: true },
+  });
+
+  if (
+    !record ||
+    record.usedAt ||
+    record.expiresAt.getTime() < Date.now()
+  ) {
+    throw new AppError(
+      400,
+      "This password reset link is invalid or expired",
+      "RESET_TOKEN_INVALID"
+    );
+  }
+
+  const passwordHash = await hashPassword(input.password);
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: record.userId },
+      data: { passwordHash },
+    }),
+    prisma.passwordResetToken.update({
+      where: { id: record.id },
+      data: { usedAt: new Date() },
+    }),
+    prisma.refreshToken.updateMany({
+      where: { userId: record.userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+    prisma.passwordResetToken.updateMany({
+      where: {
+        userId: record.userId,
+        id: { not: record.id },
+        usedAt: null,
+      },
+      data: { usedAt: new Date() },
+    }),
+  ]);
+
+  return { ok: true };
 }
 
 export async function signInOrRegisterGoogleUser(input: {

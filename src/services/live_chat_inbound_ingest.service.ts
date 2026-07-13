@@ -1,6 +1,7 @@
 import { LiveChatMessageDirection } from "@prisma/client";
 import type { proto, WAMessage } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
+import { attributeInboundReplyToCampaign } from "./campaign_engagement.service";
 import { recordTemplateMediaBuffer } from "./template-media-assets.service";
 import { encodeLiveChatBodyText } from "./live_chat_message_codec";
 
@@ -232,13 +233,22 @@ export async function ingestInboundLiveChatMessages(
       },
     });
 
-    await prisma.liveChatMessage.create({
+    const message = await prisma.liveChatMessage.create({
       data: {
         threadId: thread.id,
         direction: LiveChatMessageDirection.INBOUND,
         bodyText: storedBody,
         createdAt,
       },
+    });
+
+    await attributeInboundReplyToCampaign({
+      workspaceId,
+      deviceId,
+      peerPhone,
+      bodyText,
+      repliedAt: createdAt,
+      liveChatMessageId: message.id,
     });
   }
 }

@@ -13,11 +13,11 @@ import { contactGroupsRouter } from "./routes/contact-groups.routes";
 import { contactsRouter } from "./routes/contacts.routes";
 import { bulkCampaignsRouter } from "./routes/bulk-campaigns.routes";
 import { autoReplyRulesRouter } from "./routes/auto-reply-rules.routes";
+import { callResponderRulesRouter } from "./routes/call-responder-rules.routes";
 import { chatbotFlowsRouter } from "./routes/chatbot-flows.routes";
 import { liveChatRouter } from "./routes/live-chat.routes";
 import { groupGrabberRouter } from "./routes/group-grabber.routes";
 import { dashboardRouter } from "./routes/dashboard.routes";
-import { adminRouter } from "./routes/admin.routes";
 import { healthRouter } from "./routes/health.routes";
 import { publicRouter } from "./routes/public.routes";
 import { authRouter } from "./routes/auth.routes";
@@ -103,11 +103,11 @@ app.use("/v1/contact-groups", contactGroupsRouter);
 app.use("/v1/contacts", contactsRouter);
 app.use("/v1/bulk-campaigns", bulkCampaignsRouter);
 app.use("/v1/auto-reply-rules", autoReplyRulesRouter);
+app.use("/v1/call-responder-rules", callResponderRulesRouter);
 app.use("/v1/chatbot-flows", chatbotFlowsRouter);
 app.use("/v1/live-chat", liveChatRouter);
 app.use("/v1/group-grabber", groupGrabberRouter);
 app.use("/v1/dashboard", dashboardRouter);
-app.use("/v1/admin", adminRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Not found" } });

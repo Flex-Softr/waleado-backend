@@ -1,4 +1,5 @@
 import {
+  BulkCampaignRecipientStatus,
   BulkCampaignStatus,
   BulkDeviceMode,
   BulkScheduleType,
@@ -10,6 +11,7 @@ import {
   OutboundStatus,
   Prisma,
 } from "@prisma/client";
+import * as XLSX from "xlsx";
 import { prisma } from "../lib/prisma";
 import { env } from "../env";
 import { AppError } from "../lib/errors";
@@ -112,6 +114,7 @@ export type CreateBulkCampaignPayload = {
     activeHoursEnd?: string | null;
     inactiveHoursStart?: string | null;
     inactiveHoursEnd?: string | null;
+    timezone?: string | null;
   };
 };
 
@@ -124,6 +127,7 @@ export type BulkCampaignListItemJson = {
   deviceMode: "single" | "failover" | "round_robin";
   scheduleType: "immediate" | "scheduled";
   scheduledAt: string | null;
+  timezone: string | null;
   recipientCount: number;
   delayMinSec: number;
   delayMaxSec: number;
@@ -145,6 +149,17 @@ export type BulkCampaignListItemJson = {
     activeHoursEnd: string | null;
     inactiveHoursStart: string | null;
     inactiveHoursEnd: string | null;
+    timezone: string | null;
+  };
+  progress: {
+    sent: number;
+    failed: number;
+    pending: number;
+    sending: number;
+    replied: number;
+    total: number;
+    percent: number;
+    etaSeconds: number | null;
   };
   createdAt: string;
   updatedAt: string;
@@ -181,15 +196,16 @@ export type BulkCampaignOutboundStatsJson = {
   failed: number;
   queued: number;
   simulated: number;
+  delivered: number;
+  seen: number;
+  replied: number;
+  noReply: number;
   /** Rows not yet finalized (still in queue). */
   pendingInQueue: number;
   /** Target minus rows created (e.g. scheduled job not started). */
   notDispatchedYet: number;
-  /** Successful WhatsApp sends (same as sent). */
-  delivered: number;
-  /** Read/seen is not persisted on outbound rows yet. */
-  readReceiptsTracked: false;
-  seenCount: null;
+  readReceiptsTracked: true;
+  seenCount: number;
 };
 
 export type BulkCampaignRecentMessageJson = {
@@ -203,6 +219,38 @@ export type BulkCampaignRecentMessageJson = {
   createdAt: string;
 };
 
+export type BulkCampaignRecipientJson = {
+  id: string;
+  phone: string;
+  status: "pending" | "queued" | "sending" | "sent" | "failed" | "simulated" | "skipped" | "canceled";
+  deviceId: string | null;
+  deviceName: string | null;
+  attempts: number;
+  lastError: string | null;
+  queuedAt: string | null;
+  sentAt: string | null;
+  deliveredAt: string | null;
+  seenAt: string | null;
+  repliedAt: string | null;
+  lastReplyAt: string | null;
+  lastReplyText: string | null;
+  failedAt: string | null;
+  createdAt: string;
+};
+
+export type BulkCampaignReportResult = {
+  filename: string;
+  contentType: string;
+  body: Buffer;
+};
+
+export type BulkCampaignRecipientStatusApi = BulkCampaignRecipientJson["status"];
+export type BulkCampaignRecipientAudienceApi =
+  | "failed"
+  | "replied"
+  | "no_reply"
+  | "seen_no_reply";
+
 export type BulkCampaignDetailJson = {
   campaign: BulkCampaignListItemJson;
   template: { id: string; name: string; typeId: string } | null;
@@ -211,11 +259,71 @@ export type BulkCampaignDetailJson = {
   deviceSendStats: BulkCampaignDeviceSendStatsJson[];
   stats: BulkCampaignOutboundStatsJson;
   recentMessages: BulkCampaignRecentMessageJson[];
+  recentRecipients: BulkCampaignRecipientJson[];
 };
+
+function recipientStatusApi(
+  s: BulkCampaignRecipientStatus
+): BulkCampaignRecipientJson["status"] {
+  switch (s) {
+    case BulkCampaignRecipientStatus.QUEUED:
+      return "queued";
+    case BulkCampaignRecipientStatus.SENDING:
+      return "sending";
+    case BulkCampaignRecipientStatus.SENT:
+      return "sent";
+    case BulkCampaignRecipientStatus.FAILED:
+      return "failed";
+    case BulkCampaignRecipientStatus.SIMULATED:
+      return "simulated";
+    case BulkCampaignRecipientStatus.SKIPPED:
+      return "skipped";
+    case BulkCampaignRecipientStatus.CANCELED:
+      return "canceled";
+    case BulkCampaignRecipientStatus.PENDING:
+    default:
+      return "pending";
+  }
+}
+
+function recipientStatusFromApi(
+  status: BulkCampaignRecipientStatusApi
+): BulkCampaignRecipientStatus {
+  switch (status) {
+    case "queued":
+      return BulkCampaignRecipientStatus.QUEUED;
+    case "sending":
+      return BulkCampaignRecipientStatus.SENDING;
+    case "sent":
+      return BulkCampaignRecipientStatus.SENT;
+    case "failed":
+      return BulkCampaignRecipientStatus.FAILED;
+    case "simulated":
+      return BulkCampaignRecipientStatus.SIMULATED;
+    case "skipped":
+      return BulkCampaignRecipientStatus.SKIPPED;
+    case "canceled":
+      return BulkCampaignRecipientStatus.CANCELED;
+    case "pending":
+    default:
+      return BulkCampaignRecipientStatus.PENDING;
+  }
+}
 
 function parseStoredDeviceIds(value: Prisma.JsonValue): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((x): x is string => typeof x === "string");
+}
+
+function assignedDeviceForRecipient(
+  index: number,
+  deviceIds: string[],
+  deviceMode: BulkDeviceMode
+): string {
+  if (deviceMode === BulkDeviceMode.ROUND_ROBIN) {
+    return deviceIds[index % deviceIds.length]!;
+  }
+  return deviceIds[0]!;
 }
 
 function outboundStatusApi(s: OutboundStatus): string {
@@ -282,6 +390,18 @@ export async function getBulkCampaignDetail(
 
   const targetRecipients = campaign.recipientCount;
   const notDispatchedYet = Math.max(0, targetRecipients - totalOutboundRows);
+
+  const recipientStatusGroups = await prisma.bulkCampaignRecipient.groupBy({
+    by: ["status"],
+    where: { campaignId, workspaceId },
+    _count: { _all: true },
+  });
+  const recipientSnapshotCount = recipientStatusGroups.reduce(
+    (acc, group) => acc + group._count._all,
+    0
+  );
+  const recipientCountFor = (st: BulkCampaignRecipientStatus) =>
+    recipientStatusGroups.find((g) => g.status === st)?._count._all ?? 0;
 
   const devStatusGroups = await prisma.outboundMessage.groupBy({
     by: ["deviceId", "status"],
@@ -354,23 +474,80 @@ export async function getBulkCampaignDetail(
     createdAt: r.createdAt.toISOString(),
   }));
 
+  const recentRecipientRows = await prisma.bulkCampaignRecipient.findMany({
+    where: { campaignId, workspaceId },
+    orderBy: { createdAt: "asc" },
+    take: 100,
+    include: {
+      device: { select: { name: true } },
+    },
+  });
+
+  const recentRecipients: BulkCampaignRecipientJson[] = recentRecipientRows.map(
+    (r) => ({
+      id: r.id,
+      phone: r.phone,
+      status: recipientStatusApi(r.status),
+      deviceId: r.deviceId,
+      deviceName: r.device?.name ?? null,
+      attempts: r.attempts,
+      lastError: r.lastError,
+      queuedAt: r.queuedAt?.toISOString() ?? null,
+      sentAt: r.sentAt?.toISOString() ?? null,
+      deliveredAt: r.deliveredAt?.toISOString() ?? null,
+      seenAt: r.seenAt?.toISOString() ?? null,
+      repliedAt: r.repliedAt?.toISOString() ?? null,
+      lastReplyAt: r.lastReplyAt?.toISOString() ?? null,
+      lastReplyText: r.lastReplyText,
+      failedAt: r.failedAt?.toISOString() ?? null,
+      createdAt: r.createdAt.toISOString(),
+    })
+  );
+
   const messagePreview =
     campaign.kind === OutboundKind.TEXT
       ? (campaign.bodyText?.trim().slice(0, 500) ?? null)
       : null;
 
+  const snapshotSent = recipientCountFor(BulkCampaignRecipientStatus.SENT);
+  const snapshotFailed = recipientCountFor(BulkCampaignRecipientStatus.FAILED);
+  const snapshotQueued =
+    recipientCountFor(BulkCampaignRecipientStatus.QUEUED) +
+    recipientCountFor(BulkCampaignRecipientStatus.SENDING);
+  const snapshotSimulated = recipientCountFor(
+    BulkCampaignRecipientStatus.SIMULATED
+  );
+  const [deliveredCount, seenCount, repliedCount] = await Promise.all([
+    prisma.bulkCampaignRecipient.count({
+      where: { campaignId, workspaceId, deliveredAt: { not: null } },
+    }),
+    prisma.bulkCampaignRecipient.count({
+      where: { campaignId, workspaceId, seenAt: { not: null } },
+    }),
+    prisma.bulkCampaignRecipient.count({
+      where: { campaignId, workspaceId, repliedAt: { not: null } },
+    }),
+  ]);
+  const successfulRecipients = recipientSnapshotCount
+    ? snapshotSent + snapshotSimulated
+    : sent + simulated;
   const stats: BulkCampaignOutboundStatsJson = {
     targetRecipients,
     totalOutboundRows,
-    sent,
-    failed,
-    queued,
-    simulated,
-    pendingInQueue: queued,
-    notDispatchedYet,
-    delivered: sent,
-    readReceiptsTracked: false,
-    seenCount: null,
+    sent: recipientSnapshotCount ? snapshotSent : sent,
+    failed: recipientSnapshotCount ? snapshotFailed : failed,
+    queued: recipientSnapshotCount ? snapshotQueued : queued,
+    simulated: recipientSnapshotCount ? snapshotSimulated : simulated,
+    pendingInQueue: recipientSnapshotCount ? snapshotQueued : queued,
+    notDispatchedYet: recipientSnapshotCount
+      ? recipientCountFor(BulkCampaignRecipientStatus.PENDING)
+      : notDispatchedYet,
+    delivered: deliveredCount,
+    seen: seenCount,
+    replied: repliedCount,
+    noReply: Math.max(0, successfulRecipients - repliedCount),
+    readReceiptsTracked: true,
+    seenCount,
   };
 
   return {
@@ -383,6 +560,7 @@ export async function getBulkCampaignDetail(
       deviceMode: campaign.deviceMode,
       scheduleType: campaign.scheduleType,
       scheduledAt: campaign.scheduledAt,
+      timezone: campaign.timezone,
       recipientCount: campaign.recipientCount,
       delayMinSec: campaign.delayMinSec,
       delayMaxSec: campaign.delayMaxSec,
@@ -418,7 +596,361 @@ export async function getBulkCampaignDetail(
     deviceSendStats,
     stats,
     recentMessages,
+    recentRecipients,
   };
+}
+
+export async function exportBulkCampaignReport(
+  workspaceId: string,
+  campaignId: string,
+  format: "csv" | "xlsx"
+): Promise<BulkCampaignReportResult> {
+  const campaign = await prisma.bulkCampaign.findFirst({
+    where: { id: campaignId, workspaceId },
+    select: { id: true, name: true },
+  });
+  if (!campaign) {
+    throw new AppError(404, "Campaign not found", "NOT_FOUND");
+  }
+
+  const recipients = await prisma.bulkCampaignRecipient.findMany({
+    where: { campaignId, workspaceId },
+    orderBy: { createdAt: "asc" },
+    include: {
+      device: { select: { name: true, phone: true } },
+    },
+  });
+
+  const records =
+    recipients.length > 0
+      ? recipients.map((r) => ({
+          Phone: r.phone,
+          Status: recipientStatusApi(r.status),
+          Device: r.device
+            ? r.device.phone
+              ? `${r.device.name} (${r.device.phone})`
+              : r.device.name
+            : "",
+          Attempts: r.attempts,
+          Error: r.lastError ?? "",
+          QueuedAt: r.queuedAt?.toISOString() ?? "",
+          SentAt: r.sentAt?.toISOString() ?? "",
+          DeliveredAt: r.deliveredAt?.toISOString() ?? "",
+          SeenAt: r.seenAt?.toISOString() ?? "",
+          RepliedAt: r.repliedAt?.toISOString() ?? "",
+          LastReply: r.lastReplyText ?? "",
+          FailedAt: r.failedAt?.toISOString() ?? "",
+        }))
+      : (
+          await prisma.outboundMessage.findMany({
+            where: { bulkCampaignId: campaignId, workspaceId },
+            orderBy: { createdAt: "asc" },
+            include: { device: { select: { name: true, phone: true } } },
+          })
+        ).map((r) => ({
+          Phone: r.toPhone,
+          Status: outboundStatusApi(r.status),
+          Device: r.device.phone
+            ? `${r.device.name} (${r.device.phone})`
+            : r.device.name,
+          Attempts: r.status === OutboundStatus.QUEUED ? 0 : 1,
+          Error: r.errorMessage ?? "",
+          QueuedAt: r.createdAt.toISOString(),
+          SentAt: r.status === OutboundStatus.SENT ? r.createdAt.toISOString() : "",
+          DeliveredAt: "",
+          SeenAt: "",
+          RepliedAt: "",
+          LastReply: "",
+          FailedAt:
+            r.status === OutboundStatus.FAILED ? r.createdAt.toISOString() : "",
+        }));
+
+  const filename = `${slugifyFilename(campaign.name)}-report.${format}`;
+  if (format === "csv") {
+    return {
+      filename,
+      contentType: "text/csv; charset=utf-8",
+      body: Buffer.from(recordsToCsv(records), "utf8"),
+    };
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(records, {
+    header: [
+      "Phone",
+      "Status",
+      "Device",
+      "Attempts",
+      "Error",
+      "QueuedAt",
+      "SentAt",
+      "DeliveredAt",
+      "SeenAt",
+      "RepliedAt",
+      "LastReply",
+      "FailedAt",
+    ],
+  });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Bulk Report");
+  return {
+    filename,
+    contentType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    body: XLSX.write(workbook, { bookType: "xlsx", type: "buffer" }) as Buffer,
+  };
+}
+
+export async function listBulkCampaignRecipients(
+  workspaceId: string,
+  campaignId: string,
+  input: {
+    status?: BulkCampaignRecipientStatusApi;
+    q?: string;
+    page?: number;
+    pageSize?: number;
+  }
+): Promise<{
+  recipients: BulkCampaignRecipientJson[];
+  page: number;
+  pageSize: number;
+  total: number;
+}> {
+  const campaign = await prisma.bulkCampaign.findFirst({
+    where: { id: campaignId, workspaceId },
+    select: { id: true },
+  });
+  if (!campaign) {
+    throw new AppError(404, "Campaign not found", "NOT_FOUND");
+  }
+
+  const page = Math.max(1, Math.floor(input.page ?? 1));
+  const pageSize = Math.max(1, Math.min(200, Math.floor(input.pageSize ?? 50)));
+  const where: Prisma.BulkCampaignRecipientWhereInput = {
+    campaignId,
+    workspaceId,
+    ...(input.status ? { status: recipientStatusFromApi(input.status) } : {}),
+    ...(input.q?.trim()
+      ? { phone: { contains: input.q.trim(), mode: "insensitive" } }
+      : {}),
+  };
+
+  const [total, rows] = await Promise.all([
+    prisma.bulkCampaignRecipient.count({ where }),
+    prisma.bulkCampaignRecipient.findMany({
+      where,
+      orderBy: { createdAt: "asc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: {
+        device: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  return {
+    recipients: rows.map((r) => ({
+      id: r.id,
+      phone: r.phone,
+      status: recipientStatusApi(r.status),
+      deviceId: r.deviceId,
+      deviceName: r.device?.name ?? null,
+      attempts: r.attempts,
+      lastError: r.lastError,
+      queuedAt: r.queuedAt?.toISOString() ?? null,
+      sentAt: r.sentAt?.toISOString() ?? null,
+      deliveredAt: r.deliveredAt?.toISOString() ?? null,
+      seenAt: r.seenAt?.toISOString() ?? null,
+      repliedAt: r.repliedAt?.toISOString() ?? null,
+      lastReplyAt: r.lastReplyAt?.toISOString() ?? null,
+      lastReplyText: r.lastReplyText,
+      failedAt: r.failedAt?.toISOString() ?? null,
+      createdAt: r.createdAt.toISOString(),
+    })),
+    page,
+    pageSize,
+    total,
+  };
+}
+
+async function phonesForRecipientSelection(
+  workspaceId: string,
+  campaignId: string,
+  input: {
+    statuses?: BulkCampaignRecipientStatusApi[];
+    audience?: BulkCampaignRecipientAudienceApi;
+  }
+): Promise<string[]> {
+  const campaign = await prisma.bulkCampaign.findFirst({
+    where: { id: campaignId, workspaceId },
+    select: { id: true },
+  });
+  if (!campaign) {
+    throw new AppError(404, "Campaign not found", "NOT_FOUND");
+  }
+  let where: Prisma.BulkCampaignRecipientWhereInput = {
+    workspaceId,
+    campaignId,
+  };
+  if (input.audience === "failed") {
+    where = { ...where, status: BulkCampaignRecipientStatus.FAILED };
+  } else if (input.audience === "replied") {
+    where = { ...where, repliedAt: { not: null } };
+  } else if (input.audience === "seen_no_reply") {
+    where = { ...where, seenAt: { not: null }, repliedAt: null };
+  } else if (input.audience === "no_reply") {
+    where = {
+      ...where,
+      status: {
+        in: [
+          BulkCampaignRecipientStatus.SENT,
+          BulkCampaignRecipientStatus.SIMULATED,
+        ],
+      },
+      repliedAt: null,
+    };
+  } else {
+    const statusEnums = (input.statuses ?? ["failed"]).map(recipientStatusFromApi);
+    where = { ...where, status: { in: statusEnums } };
+  }
+  const rows = await prisma.bulkCampaignRecipient.findMany({
+    where,
+    orderBy: { createdAt: "asc" },
+    select: { phone: true },
+  });
+  return [...new Set(rows.map((r) => r.phone))];
+}
+
+export async function createRetryCampaignFromRecipients(
+  workspaceId: string,
+  campaignId: string,
+  input: {
+    statuses: BulkCampaignRecipientStatusApi[];
+    name?: string;
+    deviceIds?: string[];
+    deviceMode?: "single" | "failover" | "round_robin";
+    delayMinSec?: number;
+    delayMaxSec?: number;
+    maxRetries?: number;
+    audience?: BulkCampaignRecipientAudienceApi;
+  }
+): Promise<BulkCampaignCreateResultJson> {
+  const campaign = await prisma.bulkCampaign.findFirst({
+    where: { id: campaignId, workspaceId },
+  });
+  if (!campaign) {
+    throw new AppError(404, "Campaign not found", "NOT_FOUND");
+  }
+  const statuses: BulkCampaignRecipientStatusApi[] =
+    input.statuses.length > 0 ? input.statuses : ["failed"];
+  const phones = await phonesForRecipientSelection(workspaceId, campaignId, {
+    statuses,
+    audience: input.audience,
+  });
+  if (phones.length === 0) {
+    throw new AppError(400, "No recipients match the selected statuses", "NO_RECIPIENTS");
+  }
+
+  const deviceIds = input.deviceIds?.length
+    ? input.deviceIds
+    : parseStoredDeviceIds(campaign.deviceIds);
+
+  return createBulkCampaign(workspaceId, {
+    name:
+      input.name?.trim() ||
+      `Retry ${input.audience ?? statuses.join(", ")} - ${campaign.name}`.slice(0, 200),
+    deviceIds,
+    deviceMode: input.deviceMode ?? deviceModeApi(campaign.deviceMode),
+    kind: campaign.kind === OutboundKind.TEXT ? "text" : "template",
+    bodyText: campaign.bodyText ?? undefined,
+    templateId: campaign.templateId ?? undefined,
+    selectionMode: "manual",
+    manualPhones: phones,
+    attachmentType: campaign.attachmentType,
+    attachmentAssetId: campaign.attachmentAssetId,
+    scheduleType: "immediate",
+    delayMinSec: input.delayMinSec ?? campaign.delayMinSec,
+    delayMaxSec: input.delayMaxSec ?? campaign.delayMaxSec,
+    maxRetries: input.maxRetries ?? campaign.maxRetries,
+    antiBlock: antiBlockApiFromRow(campaign),
+  });
+}
+
+export async function createContactGroupFromCampaignRecipients(
+  workspaceId: string,
+  campaignId: string,
+  input: {
+    statuses: BulkCampaignRecipientStatusApi[];
+    audience?: BulkCampaignRecipientAudienceApi;
+    name: string;
+  }
+): Promise<{ group: { id: string; name: string; total: number }; skipped: number }> {
+  const name = input.name.trim();
+  if (!name) {
+    throw new AppError(400, "Group name is required", "VALIDATION");
+  }
+  const statuses: BulkCampaignRecipientStatusApi[] =
+    input.statuses.length > 0 ? input.statuses : ["failed"];
+  const phones = await phonesForRecipientSelection(workspaceId, campaignId, {
+    statuses,
+    audience: input.audience,
+  });
+  if (phones.length === 0) {
+    throw new AppError(400, "No recipients match the selected statuses", "NO_RECIPIENTS");
+  }
+
+  const group = await prisma.contactGroup.create({
+    data: { workspaceId, name: name.slice(0, 200) },
+  });
+  const result = await prisma.contact.createMany({
+    data: phones.map((phone) => ({
+      groupId: group.id,
+      name: phone,
+      phone,
+      status: ContactStatus.UNVERIFIED,
+    })),
+    skipDuplicates: true,
+  });
+  return {
+    group: { id: group.id, name: group.name, total: result.count },
+    skipped: phones.length - result.count,
+  };
+}
+
+function slugifyFilename(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "bulk-campaign"
+  );
+}
+
+function recordsToCsv(records: Record<string, string | number>[]): string {
+  const headers = [
+    "Phone",
+    "Status",
+    "Device",
+    "Attempts",
+    "Error",
+    "QueuedAt",
+    "SentAt",
+    "DeliveredAt",
+    "SeenAt",
+    "RepliedAt",
+    "LastReply",
+    "FailedAt",
+  ];
+  return [headers, ...records.map((record) => headers.map((h) => record[h] ?? ""))]
+    .map((row) => row.map((value) => escapeCsvCell(String(value))).join(","))
+    .join("\n");
+}
+
+function escapeCsvCell(value: string): string {
+  const normalized = value.replace(/\r?\n/g, " ");
+  return /[",\n]/.test(normalized)
+    ? `"${normalized.replace(/"/g, '""')}"`
+    : normalized;
 }
 
 function statusApi(s: BulkCampaignStatus): BulkCampaignListItemJson["status"] {
@@ -462,6 +994,7 @@ function toListItem(row: {
   deviceMode: BulkDeviceMode;
   scheduleType: BulkScheduleType;
   scheduledAt: Date | null;
+  timezone: string | null;
   recipientCount: number;
   delayMinSec: number;
   delayMaxSec: number;
@@ -482,9 +1015,20 @@ function toListItem(row: {
   activeHoursEnd: string | null;
   inactiveHoursStart: string | null;
   inactiveHoursEnd: string | null;
+  progress?: BulkCampaignListItemJson["progress"];
   createdAt: Date;
   updatedAt: Date;
 }): BulkCampaignListItemJson {
+  const emptyProgress: BulkCampaignListItemJson["progress"] = {
+    sent: 0,
+    failed: 0,
+    pending: row.recipientCount,
+    sending: 0,
+    replied: 0,
+    total: row.recipientCount,
+    percent: 0,
+    etaSeconds: null,
+  };
   return {
     id: row.id,
     name: row.name,
@@ -494,6 +1038,7 @@ function toListItem(row: {
     deviceMode: deviceModeApi(row.deviceMode),
     scheduleType: scheduleApi(row.scheduleType),
     scheduledAt: row.scheduledAt?.toISOString() ?? null,
+    timezone: row.timezone,
     recipientCount: row.recipientCount,
     delayMinSec: row.delayMinSec,
     delayMaxSec: row.delayMaxSec,
@@ -502,6 +1047,7 @@ function toListItem(row: {
     attachmentAssetId: row.attachmentAssetId,
     attachmentFileName: row.attachmentAsset?.originalName ?? null,
     antiBlock: antiBlockApiFromRow(row),
+    progress: row.progress ?? emptyProgress,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -614,10 +1160,70 @@ export async function listBulkCampaigns(
       attachmentAsset: { select: { id: true, originalName: true } },
     },
   });
+  const ids = rows.map((r) => r.id);
+  const [statusGroups, repliedGroups] = ids.length
+    ? await Promise.all([
+        prisma.bulkCampaignRecipient.groupBy({
+          by: ["campaignId", "status"],
+          where: { workspaceId, campaignId: { in: ids } },
+          _count: { _all: true },
+        }),
+        prisma.bulkCampaignRecipient.groupBy({
+          by: ["campaignId"],
+          where: {
+            workspaceId,
+            campaignId: { in: ids },
+            repliedAt: { not: null },
+          },
+          _count: { _all: true },
+        }),
+      ])
+    : [[], []] as const;
+
+  const progressByCampaign = new Map<string, BulkCampaignListItemJson["progress"]>();
+  for (const row of rows) {
+    const countStatus = (status: BulkCampaignRecipientStatus) =>
+      statusGroups.find((g) => g.campaignId === row.id && g.status === status)
+        ?._count._all ?? 0;
+    const sent =
+      countStatus(BulkCampaignRecipientStatus.SENT) +
+      countStatus(BulkCampaignRecipientStatus.SIMULATED);
+    const failed = countStatus(BulkCampaignRecipientStatus.FAILED);
+    const pending = countStatus(BulkCampaignRecipientStatus.PENDING);
+    const sending = countStatus(BulkCampaignRecipientStatus.SENDING);
+    const replied =
+      repliedGroups.find((g) => g.campaignId === row.id)?._count._all ?? 0;
+    const processed = sent + failed;
+    const total = row.recipientCount;
+    const avgDelay = Math.round((row.delayMinSec + row.delayMaxSec) / 2);
+    const remaining = pending + sending;
+    const batchPauseExtra =
+      row.antiBlockEnabled && row.batchPauseEvery > 0
+        ? Math.floor(Math.max(0, remaining - 1) / row.batchPauseEvery) *
+          row.batchPauseSec
+        : 0;
+    const etaSeconds =
+      row.status === BulkCampaignStatus.RUNNING ||
+      row.status === BulkCampaignStatus.PENDING
+        ? remaining * avgDelay + batchPauseExtra
+        : null;
+    progressByCampaign.set(row.id, {
+      sent,
+      failed,
+      pending,
+      sending,
+      replied,
+      total,
+      percent: total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0,
+      etaSeconds,
+    });
+  }
+
   return rows.map((r) =>
     toListItem({
       ...r,
       attachmentAssetId: r.attachmentAssetId,
+      progress: progressByCampaign.get(r.id),
     })
   );
 }
@@ -849,8 +1455,20 @@ export async function createBulkCampaign(
       activeHoursEnd: antiBlock.activeHoursEnd,
       inactiveHoursStart: antiBlock.inactiveHoursStart,
       inactiveHoursEnd: antiBlock.inactiveHoursEnd,
+      timezone: antiBlock.timezone,
       status: initialStatus,
     },
+  });
+
+  await prisma.bulkCampaignRecipient.createMany({
+    data: phones.map((phone, index) => ({
+      workspaceId,
+      campaignId: campaign.id,
+      phone,
+      deviceId: assignedDeviceForRecipient(index, payload.deviceIds, deviceModeEnum),
+      status: BulkCampaignRecipientStatus.PENDING,
+    })),
+    skipDuplicates: true,
   });
 
   // let dispatched = 0;
@@ -899,7 +1517,7 @@ if (scheduleType === BulkScheduleType.IMMEDIATE) {
       });
       if (claimed.count === 0) return;
 
-      const total = await executeCampaignDispatch({
+      const result = await executeCampaignDispatch({
         campaignId: campaign.id,
         workspaceId,
         phones,
@@ -916,15 +1534,19 @@ if (scheduleType === BulkScheduleType.IMMEDIATE) {
         antiBlock,
       });
 
+      const pendingLeft = await countPendingCampaignRecipients(workspaceId, campaign.id);
       await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id, workspaceId },
+        where: { id: campaign.id, workspaceId, status: { not: BulkCampaignStatus.PAUSED } },
         data: {
-          status: BulkCampaignStatus.COMPLETED,
+          status:
+            result.stoppedByFailLimit || pendingLeft > 0
+              ? BulkCampaignStatus.PAUSED
+              : BulkCampaignStatus.COMPLETED,
         },
       });
 
       console.log(
-        `Campaign ${campaign.id} completed with ${total} messages`
+        `Campaign ${campaign.id} dispatched ${result.dispatched} message(s)`
       );
     } catch (error) {
       console.error("Campaign execution failed:", error);
@@ -980,7 +1602,25 @@ type ExecuteCampaignArgs = {
   antiBlock: BulkAntiBlockSettings;
 };
 
-async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<number> {
+async function countPendingCampaignRecipients(
+  workspaceId: string,
+  campaignId: string
+): Promise<number> {
+  return prisma.bulkCampaignRecipient.count({
+    where: {
+      workspaceId,
+      campaignId,
+      status: BulkCampaignRecipientStatus.PENDING,
+    },
+  });
+}
+
+type ExecuteCampaignResult = {
+  dispatched: number;
+  stoppedByFailLimit: boolean;
+};
+
+async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<ExecuteCampaignResult> {
   const {
     campaignId,
     workspaceId,
@@ -999,6 +1639,17 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
   } = args;
   let dispatched = 0;
   let consecutiveFailures = 0;
+  const recipientRows = await prisma.bulkCampaignRecipient.findMany({
+    where: {
+      campaignId,
+      workspaceId,
+      phone: { in: phones },
+      status: BulkCampaignRecipientStatus.PENDING,
+    },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, phone: true, attempts: true },
+  });
+  const pendingRecipients = recipientRows;
 
   async function campaignIsAvailable(): Promise<boolean> {
     const row = await prisma.bulkCampaign.findFirst({
@@ -1032,7 +1683,19 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
     while (antiBlock.enabled && !canSendAt(new Date(), antiBlock)) {
       const available = await waitWhilePaused();
       if (!available) return false;
-      await sleepMs(30_000);
+      const slept = await sleepWithCampaignChecks(30_000);
+      if (!slept) return false;
+    }
+    return true;
+  }
+
+  async function sleepWithCampaignChecks(ms: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, ms);
+    while (Date.now() < deadline) {
+      const available = await waitWhilePaused();
+      if (!available) return false;
+      const remaining = deadline - Date.now();
+      await sleepMs(Math.min(2_000, Math.max(0, remaining)));
     }
     return true;
   }
@@ -1048,20 +1711,17 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
   }
 
   if (!env.WHATSAPP_BRIDGE_ENABLED) {
-    for (let i = 0; i < phones.length; i += OUTBOUND_CHUNK) {
+    for (let i = 0; i < pendingRecipients.length; i += OUTBOUND_CHUNK) {
       const available = await waitWhilePaused();
-      if (!available) return dispatched;
-      const slice = phones.slice(i, i + OUTBOUND_CHUNK);
-      const rows: Prisma.OutboundMessageCreateManyInput[] = slice.map((toPhone, j) => {
+      if (!available) return { dispatched, stoppedByFailLimit: false };
+      const slice = pendingRecipients.slice(i, i + OUTBOUND_CHUNK);
+      const rows: Prisma.OutboundMessageCreateManyInput[] = slice.map((recipient, j) => {
         const globalIdx = i + j;
-        const devId =
-          deviceMode === BulkDeviceMode.ROUND_ROBIN
-            ? deviceIds[globalIdx % deviceIds.length]!
-            : deviceIds[0]!;
+        const devId = assignedDeviceForRecipient(globalIdx, deviceIds, deviceMode);
         return {
           workspaceId,
           deviceId: devId,
-          toPhone,
+          toPhone: recipient.phone,
           kind,
           bodyText,
           templateId,
@@ -1074,25 +1734,55 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
         };
       });
       await prisma.outboundMessage.createMany({ data: rows });
+      await prisma.bulkCampaignRecipient.updateMany({
+        where: { id: { in: slice.map((recipient) => recipient.id) }, status: BulkCampaignRecipientStatus.PENDING },
+        data: {
+          status: BulkCampaignRecipientStatus.SIMULATED,
+          attempts: { increment: 1 },
+          queuedAt: new Date(),
+          sentAt: new Date(),
+          lastError: antiBlock.enabled
+            ? "Simulated mode: anti-block send-time checks are not executed."
+            : null,
+        },
+      });
       dispatched += rows.length;
     }
-    return dispatched;
+    return { dispatched, stoppedByFailLimit: false };
   }
 
-  for (let i = 0; i < phones.length; i++) {
+  for (let i = 0; i < pendingRecipients.length; i++) {
     const available = await waitWhilePaused();
-    if (!available) return dispatched;
+    if (!available) return { dispatched, stoppedByFailLimit: false };
     const sendTimeAllowed = await waitUntilSendAllowed();
-    if (!sendTimeAllowed || !(await campaignIsAvailable())) return dispatched;
+    if (!sendTimeAllowed || !(await campaignIsAvailable())) {
+      return { dispatched, stoppedByFailLimit: false };
+    }
     if (shouldStopByFailLimit(consecutiveFailures, antiBlock)) {
-      break;
+      return { dispatched, stoppedByFailLimit: true };
     }
 
-    const toPhone = phones[i]!;
-    const primaryDeviceId =
-      deviceMode === BulkDeviceMode.ROUND_ROBIN
-        ? deviceIds[i % deviceIds.length]!
-        : deviceIds[0]!;
+    const recipient = pendingRecipients[i]!;
+    const toPhone = recipient.phone;
+    const primaryDeviceId = assignedDeviceForRecipient(i, deviceIds, deviceMode);
+    const claimed = await prisma.bulkCampaignRecipient.updateMany({
+      where: {
+        id: recipient.id,
+        workspaceId,
+        campaignId,
+        status: BulkCampaignRecipientStatus.PENDING,
+      },
+      data: {
+        status: BulkCampaignRecipientStatus.SENDING,
+        deviceId: primaryDeviceId,
+        queuedAt: new Date(),
+        attempts: { increment: 1 },
+        lastError: null,
+      },
+    });
+    if (claimed.count === 0) {
+      continue;
+    }
 
     const personalizedText =
       kind === OutboundKind.TEXT
@@ -1112,6 +1802,10 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
         bulkCampaignId: campaignId,
         status: OutboundStatus.QUEUED,
       },
+    });
+    await prisma.bulkCampaignRecipient.update({
+      where: { id: recipient.id },
+      data: { outboundMessageId: row.id },
     });
 
     try {
@@ -1148,6 +1842,11 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
       const retries = Math.max(0, maxRetries);
       while (attempts <= retries && waMsg === null) {
         attempts += 1;
+        if (attempts > 1) {
+          const backoffMs = Math.min(30_000, 5_000 * (attempts - 1));
+          const slept = await sleepWithCampaignChecks(backoffMs);
+          if (!slept) return { dispatched, stoppedByFailLimit: false };
+        }
         if (deviceMode === BulkDeviceMode.FAILOVER) {
           for (const devId of deviceIds) {
             try {
@@ -1186,6 +1885,15 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
           ...(kind === OutboundKind.TEMPLATE ? { bodyText: summaryText.slice(0, 4096) } : {}),
         },
       });
+      await prisma.bulkCampaignRecipient.update({
+        where: { id: recipient.id },
+        data: {
+          status: BulkCampaignRecipientStatus.SENT,
+          deviceId: usedDeviceId,
+          sentAt: new Date(),
+          lastError: null,
+        },
+      });
       consecutiveFailures = 0;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1196,18 +1904,28 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<numbe
           errorMessage: msg.slice(0, 500),
         },
       });
+      await prisma.bulkCampaignRecipient.update({
+        where: { id: recipient.id },
+        data: {
+          status: BulkCampaignRecipientStatus.FAILED,
+          failedAt: new Date(),
+          lastError: msg.slice(0, 500),
+        },
+      });
       consecutiveFailures += 1;
     }
 
     dispatched += 1;
     if (antiBlock.enabled && dispatched % antiBlock.batchPauseEvery === 0) {
-      await sleepMs(antiBlock.batchPauseSec * 1000);
-    } else if (i < phones.length - 1) {
-      await sleepMs(randomDelayMs(delayMinSec, delayMaxSec));
+      const slept = await sleepWithCampaignChecks(antiBlock.batchPauseSec * 1000);
+      if (!slept) return { dispatched, stoppedByFailLimit: false };
+    } else if (i < pendingRecipients.length - 1) {
+      const slept = await sleepWithCampaignChecks(randomDelayMs(delayMinSec, delayMaxSec));
+      if (!slept) return { dispatched, stoppedByFailLimit: false };
     }
   }
 
-  return dispatched;
+  return { dispatched, stoppedByFailLimit: false };
 }
 
 function parseStoredPhones(value: Prisma.JsonValue): string[] {
@@ -1265,10 +1983,11 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
           activeHoursEnd: campaign.activeHoursEnd,
           inactiveHoursStart: campaign.inactiveHoursStart,
           inactiveHoursEnd: campaign.inactiveHoursEnd,
+          timezone: campaign.timezone,
         }
       );
 
-      await executeCampaignDispatch({
+      const result = await executeCampaignDispatch({
         campaignId: campaign.id,
         workspaceId: campaign.workspaceId,
         phones,
@@ -1296,11 +2015,21 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
           activeHoursEnd: campaign.activeHoursEnd,
           inactiveHoursStart: campaign.inactiveHoursStart,
           inactiveHoursEnd: campaign.inactiveHoursEnd,
+          timezone: campaign.timezone,
         },
       });
+      const pendingLeft = await countPendingCampaignRecipients(
+        campaign.workspaceId,
+        campaign.id
+      );
       await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id },
-        data: { status: BulkCampaignStatus.COMPLETED },
+        where: { id: campaign.id, status: { not: BulkCampaignStatus.PAUSED } },
+        data: {
+          status:
+            result.stoppedByFailLimit || pendingLeft > 0
+              ? BulkCampaignStatus.PAUSED
+              : BulkCampaignStatus.COMPLETED,
+        },
       });
       processed += 1;
     }

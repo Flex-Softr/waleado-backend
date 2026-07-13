@@ -5,6 +5,31 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import * as bulkCampaigns from "../services/bulk_campaigns.service";
 
 const uuidParam = z.string().uuid();
+const reportQuery = z.object({
+  format: z.enum(["csv", "xlsx"]).default("csv"),
+});
+const recipientStatus = z.enum([
+  "pending",
+  "queued",
+  "sending",
+  "sent",
+  "failed",
+  "simulated",
+  "skipped",
+  "canceled",
+]);
+const recipientAudience = z.enum([
+  "failed",
+  "replied",
+  "no_reply",
+  "seen_no_reply",
+]);
+const recipientsQuery = z.object({
+  status: recipientStatus.optional(),
+  q: z.string().max(64).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(),
+});
 
 const router = Router();
 router.use(requireAuth);
@@ -63,6 +88,7 @@ const createBody = z
           .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
           .optional()
           .nullable(),
+        timezone: z.string().max(80).optional().nullable(),
       })
       .optional(),
   })
@@ -143,6 +169,23 @@ const createBody = z
     }
   });
 
+const retryBody = z.object({
+  statuses: z.array(recipientStatus).min(1).max(8).default(["failed"]),
+  audience: recipientAudience.optional(),
+  name: z.string().min(1).max(200).optional(),
+  deviceIds: z.array(z.string().uuid()).min(1).max(20).optional(),
+  deviceMode: z.enum(["single", "failover", "round_robin"]).optional(),
+  delayMinSec: z.number().int().min(0).max(3600).optional(),
+  delayMaxSec: z.number().int().min(0).max(3600).optional(),
+  maxRetries: z.number().int().min(0).max(10).optional(),
+});
+
+const createGroupFromRecipientsBody = z.object({
+  statuses: z.array(recipientStatus).min(1).max(8).default(["failed"]),
+  audience: recipientAudience.optional(),
+  name: z.string().min(1).max(200),
+});
+
 function asyncHandler(
   fn: (req: AuthedRequest, res: import("express").Response) => Promise<void>
 ) {
@@ -181,6 +224,49 @@ router.get(
 );
 
 router.get(
+  "/:id/report",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const query = reportQuery.parse(req.query);
+    const report = await bulkCampaigns.exportBulkCampaignReport(
+      auth.wid,
+      parsed.data,
+      query.format
+    );
+    res.setHeader("Content-Type", report.contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${report.filename}"`
+    );
+    res.send(report.body);
+  })
+);
+
+router.get(
+  "/:id/recipients",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const query = recipientsQuery.parse(req.query);
+    const out = await bulkCampaigns.listBulkCampaignRecipients(auth.wid, parsed.data, query);
+    res.json(out);
+  })
+);
+
+router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const auth = req.auth;
@@ -193,6 +279,48 @@ router.get(
     }
     const detail = await bulkCampaigns.getBulkCampaignDetail(auth.wid, parsed.data);
     res.json(detail);
+  })
+);
+
+router.post(
+  "/:id/retry",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const body = retryBody.parse(req.body);
+    const out = await bulkCampaigns.createRetryCampaignFromRecipients(
+      auth.wid,
+      parsed.data,
+      body
+    );
+    res.status(201).json(out);
+  })
+);
+
+router.post(
+  "/:id/contact-group",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const parsed = uuidParam.safeParse(req.params.id);
+    if (!parsed.success) {
+      throw new AppError(400, "Invalid campaign id", "VALIDATION");
+    }
+    const body = createGroupFromRecipientsBody.parse(req.body);
+    const out = await bulkCampaigns.createContactGroupFromCampaignRecipients(
+      auth.wid,
+      parsed.data,
+      body
+    );
+    res.status(201).json(out);
   })
 );
 

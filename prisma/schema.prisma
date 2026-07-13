@@ -52,6 +52,17 @@ enum BulkCampaignStatus {
   PAUSED
 }
 
+enum BulkCampaignRecipientStatus {
+  PENDING
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  SIMULATED
+  SKIPPED
+  CANCELED
+}
+
 enum BulkSelectionMode {
   GROUPS
   ALL_VERIFIED
@@ -84,6 +95,18 @@ enum AutoReplyMessageMode {
   TEXT
   TEMPLATE
   MEDIA
+}
+
+enum CallResponderCallType {
+  RECEIVED
+  OUTGOING
+  MISSED
+  REJECTED
+}
+
+enum CallResponderMessageMode {
+  TEXT
+  TEMPLATE
 }
 
 enum BulkScheduleType {
@@ -126,6 +149,7 @@ model User {
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   refreshTokens RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
   memberships   Membership[]
 }
 
@@ -139,6 +163,19 @@ model RefreshToken {
   createdAt   DateTime  @default(now())
 
   @@index([userId])
+}
+
+model PasswordResetToken {
+  id          String    @id @default(uuid())
+  hashedToken String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Workspace {
@@ -162,7 +199,9 @@ model Workspace {
   outboundMessages       OutboundMessage[]
   contactGroups          ContactGroup[]
   bulkCampaigns          BulkCampaign[]
+  bulkCampaignRecipients BulkCampaignRecipient[]
   autoReplyRules         AutoReplyRule[]
+  callResponderRules     CallResponderRule[]
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
 }
@@ -199,7 +238,9 @@ model Device {
   createdAt         DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
   outboundMessages OutboundMessage[]
+  bulkCampaignRecipients BulkCampaignRecipient[]
   autoReplyRules   AutoReplyRule[]
+  callResponderRules CallResponderRule[]
   chatbotFlows     ChatbotFlow[]
   liveChatThreads  LiveChatThread[]
 
@@ -311,6 +352,29 @@ model AutoReplyRule {
   @@index([mediaAssetId])
 }
 
+model CallResponderRule {
+  id                   String                   @id @default(uuid())
+  workspaceId          String
+  workspace            Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId             String
+  device               Device                   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  name                 String
+  callTypes            CallResponderCallType[]
+  responseDelayMinutes Int                      @default(0)
+  messageMode          CallResponderMessageMode @default(TEXT)
+  messageBody          String?                  @db.Text
+  templateId           String?
+  template             MessageTemplate?         @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  active               Boolean                  @default(true)
+  responsesSent        Int                      @default(0)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+
+  @@index([workspaceId])
+  @@index([deviceId])
+  @@index([templateId])
+}
+
 model MessageTemplate {
   id             String            @id @default(uuid())
   workspaceId    String
@@ -332,6 +396,7 @@ model MessageTemplate {
   outboundMessages OutboundMessage[]
   bulkCampaigns    BulkCampaign[]
   autoReplyRules   AutoReplyRule[]
+  callResponderRules CallResponderRule[]
 
   @@unique([workspaceId, waTemplateName])
   @@index([workspaceId])
@@ -373,6 +438,7 @@ model BulkCampaign {
   attachmentAsset   TemplateMediaAsset? @relation(fields: [attachmentAssetId], references: [id], onDelete: SetNull)
   scheduleType     BulkScheduleType
   scheduledAt      DateTime?
+  timezone         String?
   /** How multiple selected devices share the load. */
   deviceMode       BulkDeviceMode     @default(ROUND_ROBIN)
   /** Random delay between sends: lower bound (seconds). Server enforces minimum 12s when bridge sends. */
@@ -395,6 +461,7 @@ model BulkCampaign {
   inactiveHoursEnd String?
   status           BulkCampaignStatus @default(SCHEDULED)
   outboundMessages OutboundMessage[]
+  recipients        BulkCampaignRecipient[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -402,6 +469,45 @@ model BulkCampaign {
   @@index([workspaceId])
   @@index([createdAt])
   @@index([attachmentAssetId])
+}
+
+model BulkCampaignRecipient {
+  id                String                      @id @default(uuid())
+  workspaceId       String
+  workspace         Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaignId        String
+  campaign          BulkCampaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  phone             String
+  contactId         String?
+  groupId           String?
+  deviceId          String?
+  device            Device?                     @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  status            BulkCampaignRecipientStatus @default(PENDING)
+  attempts          Int                         @default(0)
+  lastError         String?
+  queuedAt          DateTime?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  seenAt            DateTime?
+  repliedAt         DateTime?
+  lastReplyAt       DateTime?
+  lastReplyText     String?                     @db.Text
+  lastReplyMessageId String?
+  failedAt          DateTime?
+  skippedAt         DateTime?
+  canceledAt        DateTime?
+  outboundMessageId String?                     @unique
+  outboundMessage   OutboundMessage?            @relation(fields: [outboundMessageId], references: [id], onDelete: SetNull)
+  createdAt         DateTime                    @default(now())
+  updatedAt         DateTime                    @updatedAt
+
+  @@unique([campaignId, phone])
+  @@index([workspaceId])
+  @@index([campaignId, status])
+  @@index([deviceId])
+  @@index([outboundMessageId])
+  @@index([workspaceId, phone, sentAt])
+  @@index([campaignId, repliedAt])
 }
 
 model OutboundMessage {
@@ -422,6 +528,7 @@ model OutboundMessage {
   errorMessage   String?
   createdAt      DateTime        @default(now())
   liveChatMessage LiveChatMessage?
+  bulkRecipient  BulkCampaignRecipient?
 
   @@index([workspaceId])
   @@index([deviceId])

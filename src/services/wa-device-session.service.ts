@@ -8,6 +8,10 @@ import { DeviceStatus } from "@prisma/client";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
 import { dispatchAutoRepliesForInbound } from "./auto_reply_inbound.service";
+import {
+  recordCampaignMessageReceiptUpdates,
+  recordCampaignMessageStatusUpdates,
+} from "./campaign_engagement.service";
 import { dispatchChatbotFlowForInbound } from "./chatbot_inbound.service";
 import { ingestInboundLiveChatMessages } from "./live_chat_inbound_ingest.service";
 
@@ -269,11 +273,17 @@ export async function ensureConnectedWaSessionsOnStartup(): Promise<void> {
     return;
   }
 
-  const connected = await prisma.device.findMany({
-    where: { status: DeviceStatus.CONNECTED },
-    select: { id: true, workspaceId: true },
-    orderBy: { updatedAt: "desc" },
-  });
+  let connected: Array<{ id: string; workspaceId: string }>;
+  try {
+    connected = await prisma.device.findMany({
+      where: { status: DeviceStatus.CONNECTED },
+      select: { id: true, workspaceId: true },
+      orderBy: { updatedAt: "desc" },
+    });
+  } catch (err) {
+    console.error("[wa-session] startup restore skipped because the database is unavailable", err);
+    return;
+  }
 
   if (connected.length === 0) {
     return;
@@ -320,6 +330,8 @@ export async function ensureWaDeviceSession(
         existing.sock.ev.removeAllListeners("connection.update");
         existing.sock.ev.removeAllListeners("creds.update");
         existing.sock.ev.removeAllListeners("messages.upsert");
+        existing.sock.ev.removeAllListeners("messages.update");
+        existing.sock.ev.removeAllListeners("message-receipt.update");
         existing.sock.end(undefined);
       } catch {
         /* ignore */
@@ -503,6 +515,24 @@ export async function ensureWaDeviceSession(
           console.error("[wa-session] chatbot handler error", err);
         }
       });
+
+      sock.ev.on("messages.update", async (updates) => {
+        if (!updates?.length) return;
+        try {
+          await recordCampaignMessageStatusUpdates(workspaceId, deviceId, updates);
+        } catch (err) {
+          console.error("[wa-session] campaign message status update error", err);
+        }
+      });
+
+      sock.ev.on("message-receipt.update", async (updates) => {
+        if (!updates?.length) return;
+        try {
+          await recordCampaignMessageReceiptUpdates(workspaceId, deviceId, updates);
+        } catch (err) {
+          console.error("[wa-session] campaign message receipt update error", err);
+        }
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const ent = sessions.get(deviceId);
@@ -532,6 +562,8 @@ export async function stopWaDeviceSession(
       entry.sock.ev.removeAllListeners("connection.update");
       entry.sock.ev.removeAllListeners("creds.update");
       entry.sock.ev.removeAllListeners("messages.upsert");
+      entry.sock.ev.removeAllListeners("messages.update");
+      entry.sock.ev.removeAllListeners("message-receipt.update");
       entry.sock.end(undefined);
     } catch {
       /* ignore */

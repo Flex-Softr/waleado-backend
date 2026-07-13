@@ -107,11 +107,6 @@ const envSchema = z.object({
       const t = s?.trim().toUpperCase();
       return t && t.length === 2 ? t : undefined;
     }),
-  /**
-   * Comma-separated emails that see admin overview in **platform** scope (DB-wide).
-   * Other authenticated workspace admins see metrics for their JWT workspace only.
-   */
-  PLATFORM_OPERATOR_EMAILS: z.string().optional(),
   /** Google OAuth2 (authorization code flow). Both required when enabling “Continue with Google”. */
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
@@ -120,6 +115,16 @@ const envSchema = z.object({
    * Defaults to `${API_PUBLIC_URL}/v1/auth/google/callback`.
    */
   GOOGLE_OAUTH_REDIRECT_URI: z.string().optional(),
+  PASSWORD_RESET_TOKEN_MINUTES: z.coerce.number().min(5).max(120).default(30),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().optional(),
+  SMTP_SECURE: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().default("FlexoWhats <no-reply@localhost>"),
 });
 
 export type Env = z.infer<typeof envSchema>;

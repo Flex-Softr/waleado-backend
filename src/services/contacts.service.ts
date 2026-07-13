@@ -1,4 +1,5 @@
 import { ContactStatus, Prisma } from "@prisma/client";
+import * as XLSX from "xlsx";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
@@ -54,6 +55,14 @@ export type ContactGroupListItemJson = {
   createdAt: string;
   updatedAt: string;
   stats: GroupStatsJson;
+};
+
+export type ContactExportFormat = "csv" | "xlsx";
+
+export type ContactExportResult = {
+  filename: string;
+  contentType: string;
+  body: Buffer;
 };
 
 function contactToRow(c: {
@@ -175,6 +184,81 @@ export async function getGroupDetail(
     },
     contacts: contacts.map(contactToRow),
   };
+}
+
+export async function exportGroupContacts(
+  workspaceId: string,
+  groupId: string,
+  input: { format: ContactExportFormat; contactIds?: string[] }
+): Promise<ContactExportResult> {
+  const group = await assertGroupInWorkspace(workspaceId, groupId);
+  const requestedIds = input.contactIds?.filter(Boolean) ?? [];
+  const contacts = await prisma.contact.findMany({
+    where: {
+      groupId,
+      ...(requestedIds.length > 0 ? { id: { in: requestedIds } } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (requestedIds.length > 0 && contacts.length !== new Set(requestedIds).size) {
+    throw new AppError(
+      400,
+      "One or more selected contacts were not found in this group",
+      "VALIDATION"
+    );
+  }
+
+  const records = contacts.map((contact) => ({
+    Name: contact.name,
+    Phone: contact.phone,
+    Status: statusToApi(contact.status),
+  }));
+  const filename = `${slugifyFilename(group.name)}-contacts.${input.format}`;
+
+  if (input.format === "csv") {
+    return {
+      filename,
+      contentType: "text/csv; charset=utf-8",
+      body: Buffer.from(recordsToCsv(records), "utf8"),
+    };
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(records, {
+    header: ["Name", "Phone", "Status"],
+  });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Contacts");
+  return {
+    filename,
+    contentType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    body: XLSX.write(workbook, { bookType: "xlsx", type: "buffer" }) as Buffer,
+  };
+}
+
+function slugifyFilename(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "contacts"
+  );
+}
+
+function recordsToCsv(records: { Name: string; Phone: string; Status: string }[]) {
+  const headers = ["Name", "Phone", "Status"];
+  return [headers, ...records.map((r) => headers.map((h) => r[h as keyof typeof r]))]
+    .map((row) => row.map(escapeCsvCell).join(","))
+    .join("\n");
+}
+
+function escapeCsvCell(value: string): string {
+  const normalized = value.replace(/\r?\n/g, " ");
+  return /[",\n]/.test(normalized)
+    ? `"${normalized.replace(/"/g, '""')}"`
+    : normalized;
 }
 
 export async function createGroup(

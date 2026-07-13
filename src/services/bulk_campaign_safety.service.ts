@@ -15,7 +15,30 @@ export type BulkAntiBlockSettings = {
   activeHoursEnd: string | null;
   inactiveHoursStart: string | null;
   inactiveHoursEnd: string | null;
+  timezone: string | null;
 };
+
+function localHourMinute(now: Date, timezone: string | null): { hour: number; minute: number } {
+  if (!timezone) {
+    return { hour: now.getHours(), minute: now.getMinutes() };
+  }
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const hour = Number(parts.find((p) => p.type === "hour")?.value);
+    const minute = Number(parts.find((p) => p.type === "minute")?.value);
+    if (Number.isFinite(hour) && Number.isFinite(minute)) {
+      return { hour: hour === 24 ? 0 : hour, minute };
+    }
+  } catch {
+    /* Fall back to server local time for invalid/unsupported timezones. */
+  }
+  return { hour: now.getHours(), minute: now.getMinutes() };
+}
 
 export function parseTimeToMinute(input: string): number | null {
   const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(input.trim());
@@ -26,13 +49,15 @@ export function parseTimeToMinute(input: string): number | null {
 export function isWithinActiveHours(
   now: Date,
   start: string | null,
-  end: string | null
+  end: string | null,
+  timezone: string | null = null
 ): boolean {
   if (!start || !end) return true;
   const s = parseTimeToMinute(start);
   const e = parseTimeToMinute(end);
   if (s === null || e === null) return true;
-  const cur = now.getHours() * 60 + now.getMinutes();
+  const local = localHourMinute(now, timezone);
+  const cur = local.hour * 60 + local.minute;
   if (s === e) return true;
   if (s < e) return cur >= s && cur <= e;
   return cur >= s || cur <= e;
@@ -41,29 +66,32 @@ export function isWithinActiveHours(
 export function isWithinInactiveHours(
   now: Date,
   start: string | null,
-  end: string | null
+  end: string | null,
+  timezone: string | null = null
 ): boolean {
   if (!start || !end) return false;
-  return isWithinActiveHours(now, start, end);
+  return isWithinActiveHours(now, start, end, timezone);
 }
 
 export function canSendAt(
   now: Date,
   settings: Pick<
     BulkAntiBlockSettings,
-    "activeHoursStart" | "activeHoursEnd" | "inactiveHoursStart" | "inactiveHoursEnd"
+    "activeHoursStart" | "activeHoursEnd" | "inactiveHoursStart" | "inactiveHoursEnd" | "timezone"
   >
 ): boolean {
   const inActive = isWithinActiveHours(
     now,
     settings.activeHoursStart,
-    settings.activeHoursEnd
+    settings.activeHoursEnd,
+    settings.timezone
   );
   if (!inActive) return false;
   return !isWithinInactiveHours(
     now,
     settings.inactiveHoursStart,
-    settings.inactiveHoursEnd
+    settings.inactiveHoursEnd,
+    settings.timezone
   );
 }
 
@@ -198,6 +226,7 @@ export function normalizeAntiBlock(
     activeHoursEnd?: string | null;
     inactiveHoursStart?: string | null;
     inactiveHoursEnd?: string | null;
+    timezone?: string | null;
   } | null
 ): BulkAntiBlockSettings {
   const uniquenessMode =
@@ -220,6 +249,7 @@ export function normalizeAntiBlock(
     activeHoursEnd: antiBlock?.activeHoursEnd?.trim() || null,
     inactiveHoursStart: antiBlock?.inactiveHoursStart?.trim() || null,
     inactiveHoursEnd: antiBlock?.inactiveHoursEnd?.trim() || null,
+    timezone: antiBlock?.timezone?.trim() || null,
   };
 }
 
@@ -237,6 +267,7 @@ export function antiBlockApiFromRow(row: {
   activeHoursEnd: string | null;
   inactiveHoursStart: string | null;
   inactiveHoursEnd: string | null;
+  timezone?: string | null;
 }) {
   return {
     enabled: row.antiBlockEnabled,
@@ -257,6 +288,7 @@ export function antiBlockApiFromRow(row: {
     activeHoursEnd: row.activeHoursEnd,
     inactiveHoursStart: row.inactiveHoursStart,
     inactiveHoursEnd: row.inactiveHoursEnd,
+    timezone: row.timezone ?? null,
   } as const;
 }
 

@@ -8,6 +8,8 @@ import {
   logoutSession,
   refreshSession,
   registerUser,
+  requestPasswordReset,
+  resetPassword,
   getMeForUser,
   signInOrRegisterGoogleUser,
 } from "../services/auth.service";
@@ -58,6 +60,18 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1).max(128),
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email().max(255),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(20).max(256),
+  password: z
+    .string()
+    .min(10, "Password must be at least 10 characters")
+    .max(128),
 });
 
 function asyncHandler(
@@ -183,6 +197,27 @@ router.post(
     const { rawRefresh, ...payload } = await loginUser(body);
     setRefreshCookie(res, rawRefresh);
     res.json(payload);
+  })
+);
+
+router.post(
+  "/forgot-password",
+  strictAuthLimiter,
+  asyncHandler(async (req, res) => {
+    const body = forgotPasswordSchema.parse(req.body);
+    const out = await requestPasswordReset(body);
+    res.json(out);
+  })
+);
+
+router.post(
+  "/reset-password",
+  strictAuthLimiter,
+  asyncHandler(async (req, res) => {
+    const body = resetPasswordSchema.parse(req.body);
+    const out = await resetPassword(body);
+    clearRefreshCookie(res);
+    res.json(out);
   })
 );
 
