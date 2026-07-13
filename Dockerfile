@@ -21,5 +21,5 @@ COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
 
 ENV NODE_ENV=production
-EXPOSE 4000
+EXPOSE 5001
 CMD ["npm", "start"]
