@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import pinoHttp from "pino-http";
 import { env } from "./env";
 import { errorHandler } from "./middleware/error-handler";
 import { billingRouter } from "./routes/billing.routes";
@@ -35,17 +34,6 @@ app.set("etag", false);
 if (env.TRUST_PROXY) {
   app.set("trust proxy", 1);
 }
-
-app.use(
-  pinoHttp({
-    autoLogging: true,
-    customLogLevel: (_req, res, err) => {
-      if (res.statusCode >= 500 || err) return "error";
-      if (res.statusCode >= 400) return "warn";
-      return "info";
-    },
-  })
-);
 
 app.use(
   helmet({
