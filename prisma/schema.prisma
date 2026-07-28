@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   binaryTargets = ["native", "windows"]
 }
 
@@ -82,7 +82,9 @@ enum BulkUniquenessMode {
 }
 
 enum AutoReplyTriggerType {
-  /** Whole-word match (word boundaries). */
+  /**
+   * Whole-word match (word boundaries).
+   */
   KEYWORD
   EXACT
   CONTAINS
@@ -139,18 +141,22 @@ enum LiveChatContentKind {
 }
 
 model User {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  /** Null when the user only signs in with Google OAuth. */
-  passwordHash  String?
-  /** Google OAuth subject (`sub`); stable per Google account. */
-  googleId      String?        @unique
-  name          String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  refreshTokens RefreshToken[]
+  id                  String               @id @default(uuid())
+  email               String               @unique
+  /**
+   * Null when the user only signs in with Google OAuth.
+   */
+  passwordHash        String?
+  /**
+   * Google OAuth subject (`sub`); stable per Google account.
+   */
+  googleId            String?              @unique
+  name                String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
-  memberships   Membership[]
+  memberships         Membership[]
 }
 
 model RefreshToken {
@@ -179,18 +185,20 @@ model PasswordResetToken {
 }
 
 model Workspace {
-  id                     String        @id @default(uuid())
+  id                     String                  @id @default(uuid())
   name                   String
-  slug                   String        @unique
-  plan                   Plan          @default(FREE)
-  stripeCustomerId       String?       @unique
-  stripeSubscriptionId   String?       @unique
-  /** Last checkout provider used for a paid period (stripe | sslcommerz); helps reset/downgrade rules. */
+  slug                   String                  @unique
+  plan                   Plan                    @default(FREE)
+  stripeCustomerId       String?                 @unique
+  stripeSubscriptionId   String?                 @unique
+  /**
+   * Last checkout provider used for a paid period (stripe | sslcommerz); helps reset/downgrade rules.
+   */
   lastPaymentGateway     String?
   subscriptionStatus     String?
   currentPeriodEnd       DateTime?
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
   memberships            Membership[]
   paymentTransactions    PaymentTransaction[]
   devices                Device[]
@@ -206,7 +214,9 @@ model Workspace {
   liveChatThreads        LiveChatThread[]
 }
 
-/** Tracks hosted checkouts (SSLCommerz, future gateways) before confirmation. */
+/**
+ * Tracks hosted checkouts (SSLCommerz, future gateways) before confirmation.
+ */
 model PaymentTransaction {
   id          String    @id @default(uuid())
   gateway     String
@@ -227,41 +237,41 @@ model PaymentTransaction {
 }
 
 model Device {
-  id                String       @id @default(uuid())
-  workspaceId       String
-  workspace         Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name              String
-  sessionId         String       @unique
-  status            DeviceStatus @default(QR_READY)
-  phone             String?
-  profilePictureUrl String?
-  createdAt         DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  outboundMessages OutboundMessage[]
+  id                     String                  @id @default(uuid())
+  workspaceId            String
+  workspace              Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name                   String
+  sessionId              String                  @unique
+  status                 DeviceStatus            @default(QR_READY)
+  phone                  String?
+  profilePictureUrl      String?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  outboundMessages       OutboundMessage[]
   bulkCampaignRecipients BulkCampaignRecipient[]
-  autoReplyRules   AutoReplyRule[]
-  callResponderRules CallResponderRule[]
-  chatbotFlows     ChatbotFlow[]
-  liveChatThreads  LiveChatThread[]
+  autoReplyRules         AutoReplyRule[]
+  callResponderRules     CallResponderRule[]
+  chatbotFlows           ChatbotFlow[]
+  liveChatThreads        LiveChatThread[]
 
   @@index([workspaceId])
 }
 
 model ChatbotFlow {
-  id                String   @id @default(uuid())
+  id                String            @id @default(uuid())
   workspaceId       String
-  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace         Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deviceId          String
-  device            Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device            Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   name              String
-  description       String   @default("")
+  description       String            @default("")
   triggerKeywords   String
-  cooldownMinutes   Int      @default(0)
-  active            Boolean  @default(true)
-  conversationCount Int      @default(0)
+  cooldownMinutes   Int               @default(0)
+  active            Boolean           @default(true)
+  conversationCount Int               @default(0)
   nodes             ChatbotFlowNode[]
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   @@index([workspaceId])
   @@index([deviceId])
@@ -282,18 +292,18 @@ model ChatbotFlowNode {
 }
 
 model LiveChatThread {
-  id             String    @id @default(uuid())
-  workspaceId    String
-  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  deviceId       String
-  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  peerPhone      String
-  peerLabel      String    @default("")
-  lastPreview    String    @default("")
-  lastMessageAt  DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  messages       LiveChatMessage[]
+  id            String            @id @default(uuid())
+  workspaceId   String
+  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId      String
+  device        Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  peerPhone     String
+  peerLabel     String            @default("")
+  lastPreview   String            @default("")
+  lastMessageAt DateTime?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  messages      LiveChatMessage[]
 
   @@unique([workspaceId, deviceId, peerPhone])
   @@index([workspaceId, deviceId])
@@ -320,32 +330,36 @@ model LiveChatMessage {
 }
 
 model AutoReplyRule {
-  id              String   @id @default(uuid())
+  id              String               @id @default(uuid())
   workspaceId     String
-  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deviceId        String
-  device          Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  device          Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
   name            String
-  /** One or more triggers (comma / newline / ; / | separated). Semantics depend on triggerType. */
-  keyword         String   @db.Text
+  /**
+   * One or more triggers (comma / newline / ; / | separated). Semantics depend on triggerType.
+   */
+  keyword         String               @db.Text
   triggerType     AutoReplyTriggerType @default(CONTAINS)
-  caseSensitive   Boolean  @default(false)
-  priority        Int      @default(100)
-  cooldownMinutes Int      @default(0)
+  caseSensitive   Boolean              @default(false)
+  priority        Int                  @default(100)
+  cooldownMinutes Int                  @default(0)
   messageMode     AutoReplyMessageMode @default(TEXT)
   templateId      String?
-  template        MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  template        MessageTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
   mediaAssetId    String?
-  mediaAsset      TemplateMediaAsset? @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
-  mediaCaption    String?  @db.Text
-  response        String   @db.Text
-  openAiEnabled   Boolean  @default(false)
-  /** OpenAI-compatible API settings (apiKey, model, baseUrl, systemPrompt, temperature, maxTokens, continuousChat). */
+  mediaAsset      TemplateMediaAsset?  @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+  mediaCaption    String?              @db.Text
+  response        String               @db.Text
+  openAiEnabled   Boolean              @default(false)
+  /**
+   * OpenAI-compatible API settings (apiKey, model, baseUrl, systemPrompt, temperature, maxTokens, continuousChat).
+   */
   openAiSettings  Json?
-  active          Boolean  @default(true)
-  responseCount   Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  active          Boolean              @default(true)
+  responseCount   Int                  @default(0)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
 
   @@index([workspaceId])
   @@index([deviceId])
@@ -376,26 +390,30 @@ model CallResponderRule {
 }
 
 model MessageTemplate {
-  id             String            @id @default(uuid())
-  workspaceId    String
-  workspace      Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name           String
-  waTemplateName String
-  language       String            @default("en")
-  body           String?
-  category       String            @default("general")
-  typeId         String            @default("text_message")
-  footer         String?
-  buttons        Json?
-  /** Type-specific payload: file refs, URLs, location, poll, list rows, etc. */
-  media          Json?
-  /** When false, hidden from send/campaign pickers; existing automations may still reference the id. */
-  active         Boolean           @default(true)
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-  outboundMessages OutboundMessage[]
-  bulkCampaigns    BulkCampaign[]
-  autoReplyRules   AutoReplyRule[]
+  id                 String              @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name               String
+  waTemplateName     String
+  language           String              @default("en")
+  body               String?
+  category           String              @default("general")
+  typeId             String              @default("text_message")
+  footer             String?
+  buttons            Json?
+  /**
+   * Type-specific payload: file refs, URLs, location, poll, list rows, etc.
+   */
+  media              Json?
+  /**
+   * When false, hidden from send/campaign pickers; existing automations may still reference the id.
+   */
+  active             Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  outboundMessages   OutboundMessage[]
+  bulkCampaigns      BulkCampaign[]
+  autoReplyRules     AutoReplyRule[]
   callResponderRules CallResponderRule[]
 
   @@unique([workspaceId, waTemplateName])
@@ -403,65 +421,73 @@ model MessageTemplate {
 }
 
 model TemplateMediaAsset {
-  id            String    @id @default(uuid())
-  workspaceId   String
-  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  /** Stored file name on disk (basename only, under workspace folder). */
-  fileName      String
-  mimeType      String
-  originalName  String
-  byteSize      Int
-  createdAt     DateTime  @default(now())
-  bulkCampaigns BulkCampaign[]
-  autoReplyRules AutoReplyRule[]
+  id               String            @id @default(uuid())
+  workspaceId      String
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /**
+   * Stored file name on disk (basename only, under workspace folder).
+   */
+  fileName         String
+  mimeType         String
+  originalName     String
+  byteSize         Int
+  createdAt        DateTime          @default(now())
+  bulkCampaigns    BulkCampaign[]
+  autoReplyRules   AutoReplyRule[]
   liveChatMessages LiveChatMessage[]
 
   @@index([workspaceId])
 }
 
 model BulkCampaign {
-  id               String             @id @default(uuid())
-  workspaceId      String
-  workspace        Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name             String
-  kind             OutboundKind
-  bodyText         String?
-  templateId       String?
-  template         MessageTemplate?   @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  deviceIds        Json
-  selectionMode    BulkSelectionMode
-  groupIds         Json?
-  recipientPhones  Json
-  recipientCount   Int                @default(0)
-  attachmentType   String?
-  attachmentAssetId String?
-  attachmentAsset   TemplateMediaAsset? @relation(fields: [attachmentAssetId], references: [id], onDelete: SetNull)
-  scheduleType     BulkScheduleType
-  scheduledAt      DateTime?
-  timezone         String?
-  /** How multiple selected devices share the load. */
-  deviceMode       BulkDeviceMode     @default(ROUND_ROBIN)
-  /** Random delay between sends: lower bound (seconds). Server enforces minimum 12s when bridge sends. */
-  delayMinSec      Int                @default(12)
-  /** Random delay between sends: upper bound (seconds). */
-  delayMaxSec      Int                @default(45)
-  maxRetries       Int                @default(3)
-  antiBlockEnabled Boolean            @default(false)
-  spintaxEnabled   Boolean            @default(false)
-  verifyNumbers    Boolean            @default(false)
-  repliedOnly      Boolean            @default(false)
-  recent24hOnly    Boolean            @default(false)
-  uniquenessMode   BulkUniquenessMode @default(NONE)
-  batchPauseEvery  Int                @default(30)
-  batchPauseSec    Int                @default(30)
-  failLimitInRow   Int                @default(5)
-  activeHoursStart String?
-  activeHoursEnd   String?
+  id                 String                  @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name               String
+  kind               OutboundKind
+  bodyText           String?
+  templateId         String?
+  template           MessageTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  deviceIds          Json
+  selectionMode      BulkSelectionMode
+  groupIds           Json?
+  recipientPhones    Json
+  recipientCount     Int                     @default(0)
+  attachmentType     String?
+  attachmentAssetId  String?
+  attachmentAsset    TemplateMediaAsset?     @relation(fields: [attachmentAssetId], references: [id], onDelete: SetNull)
+  scheduleType       BulkScheduleType
+  scheduledAt        DateTime?
+  timezone           String?
+  /**
+   * How multiple selected devices share the load.
+   */
+  deviceMode         BulkDeviceMode          @default(ROUND_ROBIN)
+  /**
+   * Random delay between sends: lower bound (seconds). Server enforces minimum 12s when bridge sends.
+   */
+  delayMinSec        Int                     @default(12)
+  /**
+   * Random delay between sends: upper bound (seconds).
+   */
+  delayMaxSec        Int                     @default(45)
+  maxRetries         Int                     @default(3)
+  antiBlockEnabled   Boolean                 @default(false)
+  spintaxEnabled     Boolean                 @default(false)
+  verifyNumbers      Boolean                 @default(false)
+  repliedOnly        Boolean                 @default(false)
+  recent24hOnly      Boolean                 @default(false)
+  uniquenessMode     BulkUniquenessMode      @default(NONE)
+  batchPauseEvery    Int                     @default(30)
+  batchPauseSec      Int                     @default(30)
+  failLimitInRow     Int                     @default(5)
+  activeHoursStart   String?
+  activeHoursEnd     String?
   inactiveHoursStart String?
-  inactiveHoursEnd String?
-  status           BulkCampaignStatus @default(SCHEDULED)
-  outboundMessages OutboundMessage[]
-  recipients        BulkCampaignRecipient[]
+  inactiveHoursEnd   String?
+  status             BulkCampaignStatus      @default(SCHEDULED)
+  outboundMessages   OutboundMessage[]
+  recipients         BulkCampaignRecipient[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -472,34 +498,34 @@ model BulkCampaign {
 }
 
 model BulkCampaignRecipient {
-  id                String                      @id @default(uuid())
-  workspaceId       String
-  workspace         Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  campaignId        String
-  campaign          BulkCampaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  phone             String
-  contactId         String?
-  groupId           String?
-  deviceId          String?
-  device            Device?                     @relation(fields: [deviceId], references: [id], onDelete: SetNull)
-  status            BulkCampaignRecipientStatus @default(PENDING)
-  attempts          Int                         @default(0)
-  lastError         String?
-  queuedAt          DateTime?
-  sentAt            DateTime?
-  deliveredAt       DateTime?
-  seenAt            DateTime?
-  repliedAt         DateTime?
-  lastReplyAt       DateTime?
-  lastReplyText     String?                     @db.Text
+  id                 String                      @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaignId         String
+  campaign           BulkCampaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  phone              String
+  contactId          String?
+  groupId            String?
+  deviceId           String?
+  device             Device?                     @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  status             BulkCampaignRecipientStatus @default(PENDING)
+  attempts           Int                         @default(0)
+  lastError          String?
+  queuedAt           DateTime?
+  sentAt             DateTime?
+  deliveredAt        DateTime?
+  seenAt             DateTime?
+  repliedAt          DateTime?
+  lastReplyAt        DateTime?
+  lastReplyText      String?                     @db.Text
   lastReplyMessageId String?
-  failedAt          DateTime?
-  skippedAt         DateTime?
-  canceledAt        DateTime?
-  outboundMessageId String?                     @unique
-  outboundMessage   OutboundMessage?            @relation(fields: [outboundMessageId], references: [id], onDelete: SetNull)
-  createdAt         DateTime                    @default(now())
-  updatedAt         DateTime                    @updatedAt
+  failedAt           DateTime?
+  skippedAt          DateTime?
+  canceledAt         DateTime?
+  outboundMessageId  String?                     @unique
+  outboundMessage    OutboundMessage?            @relation(fields: [outboundMessageId], references: [id], onDelete: SetNull)
+  createdAt          DateTime                    @default(now())
+  updatedAt          DateTime                    @updatedAt
 
   @@unique([campaignId, phone])
   @@index([workspaceId])
@@ -511,24 +537,24 @@ model BulkCampaignRecipient {
 }
 
 model OutboundMessage {
-  id             String          @id @default(uuid())
-  workspaceId    String
-  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  deviceId       String
-  device         Device          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  toPhone        String
-  kind           OutboundKind
-  bodyText       String?
-  templateId     String?
-  template       MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  bulkCampaignId String?
-  bulkCampaign   BulkCampaign?   @relation(fields: [bulkCampaignId], references: [id], onDelete: SetNull)
-  status         OutboundStatus  @default(QUEUED)
-  providerRef    String?
-  errorMessage   String?
-  createdAt      DateTime        @default(now())
+  id              String                 @id @default(uuid())
+  workspaceId     String
+  workspace       Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId        String
+  device          Device                 @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  toPhone         String
+  kind            OutboundKind
+  bodyText        String?
+  templateId      String?
+  template        MessageTemplate?       @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  bulkCampaignId  String?
+  bulkCampaign    BulkCampaign?          @relation(fields: [bulkCampaignId], references: [id], onDelete: SetNull)
+  status          OutboundStatus         @default(QUEUED)
+  providerRef     String?
+  errorMessage    String?
+  createdAt       DateTime               @default(now())
   liveChatMessage LiveChatMessage?
-  bulkRecipient  BulkCampaignRecipient?
+  bulkRecipient   BulkCampaignRecipient?
 
   @@index([workspaceId])
   @@index([deviceId])
@@ -570,13 +596,13 @@ model StripeEventLog {
 }
 
 model Membership {
-  id          String           @id @default(uuid())
+  id          String         @id @default(uuid())
   userId      String
   workspaceId String
-  role        MembershipRole   @default(MEMBER)
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdAt   DateTime         @default(now())
+  role        MembershipRole @default(MEMBER)
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdAt   DateTime       @default(now())
 
   @@unique([userId, workspaceId])
   @@index([workspaceId])

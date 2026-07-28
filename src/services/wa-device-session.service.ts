@@ -53,6 +53,43 @@ function jidToPhone(jid: string | undefined): string | null {
   return m ? `+${m[1]}` : null;
 }
 
+function isLidJid(jid: string): boolean {
+  const j = jid.toLowerCase();
+  return j.endsWith("@lid") || j.endsWith("@hosted.lid");
+}
+
+function isPhoneNetworkJid(jid: string): boolean {
+  const j = jid.toLowerCase();
+  return j.endsWith("@s.whatsapp.net") || j.endsWith("@c.us");
+}
+
+/** Normalize bare digits or a phone JID into …@s.whatsapp.net; reject LIDs. */
+function toPhoneNetworkJid(raw: string | undefined): string | null {
+  if (!raw?.trim()) return null;
+  const trimmed = raw.trim();
+  if (isLidJid(trimmed)) return null;
+  if (/^\d{6,15}$/.test(trimmed)) {
+    return `${trimmed}@s.whatsapp.net`;
+  }
+  if (isPhoneNetworkJid(trimmed)) {
+    return jidNormalizedUser(trimmed) || null;
+  }
+  return null;
+}
+
+/** Prefer creds.me.phoneNumber when me.id is a LID (LID digits are not E.164). */
+function ownPhoneFromCreds(sock: WASocket): string | null {
+  const me = sock.authState.creds.me;
+  const fromPn = toPhoneNetworkJid(me?.phoneNumber);
+  if (fromPn) return jidToPhone(fromPn);
+
+  const id = me?.id ?? sock.user?.id;
+  if (id && !isLidJid(id) && isPhoneNetworkJid(id)) {
+    return jidToPhone(id);
+  }
+  return null;
+}
+
 const PROFILE_PIC_QUERY_MS = 14_000;
 const PROFILE_FETCH_DEFER_MS = 1_200;
 
@@ -64,13 +101,31 @@ function staticProfileImageUrlFromCreds(sock: WASocket): string | null {
   return null;
 }
 
-/** PN / LID / phone variants — WhatsApp may only resolve DP for one of them. */
+function isProfilePictureNotFound(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { message?: string; data?: unknown };
+  if (e.message === "item-not-found") return true;
+  return e.data === 404;
+}
+
+/** PN first, then LID only if no PN — WhatsApp may only resolve DP for one of them. */
 function profilePictureJidCandidates(sock: WASocket): string[] {
   const me = sock.authState.creds.me;
   if (!me?.id) return [];
-  const raw: string[] = [me.id];
-  if (me.phoneNumber) raw.push(me.phoneNumber);
-  if (me.lid) raw.push(me.lid);
+
+  const raw: string[] = [];
+  const pn = toPhoneNetworkJid(me.phoneNumber);
+  if (pn) raw.push(pn);
+
+  if (!isLidJid(me.id) && isPhoneNetworkJid(me.id)) {
+    raw.push(me.id);
+  }
+
+  if (raw.length === 0) {
+    if (me.lid) raw.push(me.lid);
+    else if (isLidJid(me.id)) raw.push(me.id);
+  }
+
   const normalized = raw
     .map((j) => jidNormalizedUser(j))
     .filter((j): j is string => Boolean(j));
@@ -109,10 +164,16 @@ async function fetchOwnProfilePictureUrl(
         );
         if (url) return url;
       } catch (err) {
-        console.warn(
-          `[wa-session] profilePictureUrl jid=${jid} (${type})`,
-          err
-        );
+        if (isProfilePictureNotFound(err)) {
+          console.warn(
+            `[wa-session] profilePictureUrl jid=${jid} (${type}): item-not-found`
+          );
+        } else {
+          console.warn(
+            `[wa-session] profilePictureUrl jid=${jid} (${type})`,
+            err
+          );
+        }
       }
     }
   }
@@ -402,8 +463,7 @@ export async function ensureWaDeviceSession(
         if (connection === "open") {
           ent.qr = null;
           ent.connection = "open";
-          const jid = sock.authState.creds.me?.id ?? sock.user?.id;
-          const phone = jidToPhone(jid);
+          const phone = ownPhoneFromCreds(sock);
 
           void prisma.device
             .update({
