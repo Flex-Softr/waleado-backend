@@ -28,6 +28,7 @@ import {
   applyPhoneFilters,
   applySpintax,
   canSendAt,
+  filterVerifiedFromContacts,
   normalizeAntiBlock,
   randomDelayMs,
   shouldStopByFailLimit,
@@ -35,14 +36,21 @@ import {
   toJsonValue,
   type BulkAntiBlockSettings,
 } from "./bulk_campaign_safety.service";
+import {
+  DeviceDailyCapExceededError,
+  WA_DEVICE_BULK_MIN_GAP_MS,
+  WA_DEVICE_DAILY_SEND_CAP,
+  withDeviceOutboundGate,
+} from "../lib/wa-device-outbound-gate";
 
 const MAX_RECIPIENTS = 2000;
 const OUTBOUND_CHUNK = 250;
 const SCHEDULED_POLL_MS = 15_000;
+const FAILOVER_DEVICE_GAP_MS = 5_000;
 let scheduledLoopStarted = false;
 let scheduledLoopBusy = false;
 /** WhatsApp anti-spam: minimum pause between bulk sends (seconds). */
-const WHATSAPP_MIN_DELAY_SEC = 12;
+const WHATSAPP_MIN_DELAY_SEC = Math.ceil(WA_DEVICE_BULK_MIN_GAP_MS / 1000);
 
 function normalizeDelayRangeSec(
   minSec: number,
@@ -95,7 +103,7 @@ export type CreateBulkCampaignPayload = {
   attachmentAssetId?: string | null;
   scheduleType: "immediate" | "scheduled";
   scheduledAt?: string | null;
-  /** Random delay lower bound (seconds). Server enforces min 12s. */
+  /** Random delay lower bound (seconds). Server enforces min 15s. */
   delayMinSec: number;
   /** Random delay upper bound (seconds). */
   delayMaxSec: number;
@@ -1109,13 +1117,26 @@ async function resolveRecipientPhones(
         set.add(v.e164);
       }
     }
+    // Manual lists are still restricted to verified contacts in this workspace.
+    const verified = await prisma.contact.findMany({
+      where: {
+        phone: { in: [...set] },
+        status: ContactStatus.VERIFIED,
+        group: { workspaceId },
+      },
+      select: { phone: true },
+    });
+    set.clear();
+    for (const r of verified) {
+      set.add(r.phone);
+    }
   }
 
   const phones = [...set];
   if (phones.length === 0) {
     throw new AppError(
       400,
-      "No valid recipients. For groups / all verified, ensure you have verified contacts.",
+      "No verified recipients. Only contacts with status VERIFIED can be included in bulk campaigns.",
       "NO_RECIPIENTS"
     );
   }
@@ -1198,7 +1219,7 @@ export async function listBulkCampaigns(
     const avgDelay = Math.round((row.delayMinSec + row.delayMaxSec) / 2);
     const remaining = pending + sending;
     const batchPauseExtra =
-      row.antiBlockEnabled && row.batchPauseEvery > 0
+      row.batchPauseEvery > 0
         ? Math.floor(Math.max(0, remaining - 1) / row.batchPauseEvery) *
           row.batchPauseSec
         : 0;
@@ -1349,7 +1370,7 @@ export async function createBulkCampaign(
   if (phones.length === 0) {
     throw new AppError(
       400,
-      "No recipients remain after anti-block filters",
+      "No verified recipients remain after filters. Only VERIFIED contacts can receive bulk messages.",
       "NO_RECIPIENTS"
     );
   }
@@ -1444,7 +1465,7 @@ export async function createBulkCampaign(
       maxRetries: payload.maxRetries,
       antiBlockEnabled: antiBlock.enabled,
       spintaxEnabled: antiBlock.spintaxEnabled,
-      verifyNumbers: antiBlock.verifyNumbers,
+      verifyNumbers: true,
       repliedOnly: antiBlock.repliedOnly,
       recent24hOnly: antiBlock.recent24hOnly,
       uniquenessMode: antiBlock.uniquenessMode,
@@ -1471,95 +1492,65 @@ export async function createBulkCampaign(
     skipDuplicates: true,
   });
 
-  // let dispatched = 0;
-  // if (scheduleType === BulkScheduleType.IMMEDIATE) {
-  //   dispatched = await executeCampaignDispatch({
-  //     campaignId: campaign.id,
-  //     workspaceId,
-  //     phones,
-  //     deviceIds: payload.deviceIds,
-  //     deviceMode: deviceModeEnum,
-  //     kind,
-  //     bodyText,
-  //     templateId,
-  //     attachmentType,
-  //     attachmentAssetId,
-  //     delayMinSec: delayNorm.min,
-  //     delayMaxSec: delayNorm.max,
-  //     maxRetries: Math.max(0, payload.maxRetries),
-  //     antiBlock,
-  //   });
-  //   await prisma.bulkCampaign.update({
-  //     where: { id: campaign.id },
-  //     data: { status: BulkCampaignStatus.COMPLETED },
-  //   });
-  // }
-
   let dispatched = 0;
 
-if (scheduleType === BulkScheduleType.IMMEDIATE) {
-  // set pending first
-  await prisma.bulkCampaign.update({
-    where: { id: campaign.id },
-    data: {
-      status: BulkCampaignStatus.PENDING,
-    },
-  });
+  if (scheduleType === BulkScheduleType.IMMEDIATE) {
+    // Background processing — claim PENDING → RUNNING then dispatch.
+    setImmediate(async () => {
+      try {
+        const claimed = await prisma.bulkCampaign.updateMany({
+          where: { id: campaign.id, workspaceId, status: BulkCampaignStatus.PENDING },
+          data: {
+            status: BulkCampaignStatus.RUNNING,
+          },
+        });
+        if (claimed.count === 0) return;
 
-  // background processing
-  setImmediate(async () => {
-    try {
-      const claimed = await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id, workspaceId, status: BulkCampaignStatus.PENDING },
-        data: {
-          status: BulkCampaignStatus.RUNNING,
-        },
-      });
-      if (claimed.count === 0) return;
+        const result = await executeCampaignDispatch({
+          campaignId: campaign.id,
+          workspaceId,
+          phones,
+          deviceIds: payload.deviceIds,
+          deviceMode: deviceModeEnum,
+          kind,
+          bodyText,
+          templateId,
+          attachmentType,
+          attachmentAssetId,
+          delayMinSec: delayNorm.min,
+          delayMaxSec: delayNorm.max,
+          maxRetries: Math.max(0, payload.maxRetries),
+          antiBlock,
+        });
 
-      const result = await executeCampaignDispatch({
-        campaignId: campaign.id,
-        workspaceId,
-        phones,
-        deviceIds: payload.deviceIds,
-        deviceMode: deviceModeEnum,
-        kind,
-        bodyText,
-        templateId,
-        attachmentType,
-        attachmentAssetId,
-        delayMinSec: delayNorm.min,
-        delayMaxSec: delayNorm.max,
-        maxRetries: Math.max(0, payload.maxRetries),
-        antiBlock,
-      });
+        const pendingLeft = await countPendingCampaignRecipients(workspaceId, campaign.id);
+        await prisma.bulkCampaign.updateMany({
+          where: { id: campaign.id, workspaceId, status: { not: BulkCampaignStatus.PAUSED } },
+          data: {
+            status:
+              result.stoppedByFailLimit ||
+              result.stoppedByDailyCap ||
+              pendingLeft > 0
+                ? BulkCampaignStatus.PAUSED
+                : BulkCampaignStatus.COMPLETED,
+          },
+        });
 
-      const pendingLeft = await countPendingCampaignRecipients(workspaceId, campaign.id);
-      await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id, workspaceId, status: { not: BulkCampaignStatus.PAUSED } },
-        data: {
-          status:
-            result.stoppedByFailLimit || pendingLeft > 0
-              ? BulkCampaignStatus.PAUSED
-              : BulkCampaignStatus.COMPLETED,
-        },
-      });
+        console.log(
+          `Campaign ${campaign.id} dispatched ${result.dispatched} message(s)`
+        );
+      } catch (error) {
+        console.error("Campaign execution failed:", error);
 
-      console.log(
-        `Campaign ${campaign.id} dispatched ${result.dispatched} message(s)`
-      );
-    } catch (error) {
-      console.error("Campaign execution failed:", error);
-
-      await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id, workspaceId },
-        data: {
-          status: BulkCampaignStatus.FAILED,
-        },
-      });
-    }
-  });
-}
+        await prisma.bulkCampaign.updateMany({
+          where: { id: campaign.id, workspaceId },
+          data: {
+            status: BulkCampaignStatus.FAILED,
+          },
+        });
+      }
+    });
+  }
 
   const refreshed = await prisma.bulkCampaign.findUniqueOrThrow({
     where: { id: campaign.id },
@@ -1570,10 +1561,10 @@ if (scheduleType === BulkScheduleType.IMMEDIATE) {
 
   const note =
     scheduleType === BulkScheduleType.SCHEDULED
-      ? "Campaign saved as scheduled. A background worker can read scheduled campaigns and enqueue sends when you connect delivery."
+      ? "Campaign saved as scheduled. The background worker will start sending when the scheduled time is due."
       : env.WHATSAPP_BRIDGE_ENABLED
-        ? "Immediate campaign: WhatsApp sends were attempted per recipient. Check outbound rows for any failures."
-        : "Bridge is off: messages recorded as simulated per recipient. Set WHATSAPP_BRIDGE_ENABLED=true and use connected devices for real delivery.";
+        ? "Immediate campaign queued and sending in the background. Track progress on the campaign detail page."
+        : "Bridge is off: messages will be recorded as simulated. Set WHATSAPP_BRIDGE_ENABLED=true and use connected devices for real delivery.";
 
   return {
     campaign: toListItem({
@@ -1618,7 +1609,61 @@ async function countPendingCampaignRecipients(
 type ExecuteCampaignResult = {
   dispatched: number;
   stoppedByFailLimit: boolean;
+  stoppedByDailyCap: boolean;
 };
+
+async function markFilteredOutRecipientsSkipped(
+  workspaceId: string,
+  campaignId: string,
+  keepPhones: string[]
+): Promise<void> {
+  const keep = new Set(keepPhones);
+  const pending = await prisma.bulkCampaignRecipient.findMany({
+    where: {
+      workspaceId,
+      campaignId,
+      status: BulkCampaignRecipientStatus.PENDING,
+    },
+    select: { id: true, phone: true },
+  });
+  const skipIds = pending.filter((r) => !keep.has(r.phone)).map((r) => r.id);
+  if (skipIds.length === 0) return;
+  await prisma.bulkCampaignRecipient.updateMany({
+    where: { id: { in: skipIds } },
+    data: {
+      status: BulkCampaignRecipientStatus.SKIPPED,
+      lastError:
+        "Skipped: not a VERIFIED contact in this workspace (or removed by campaign filters)",
+    },
+  });
+}
+
+/**
+ * After a process restart, RUNNING campaigns and SENDING recipients are orphaned
+ * because dispatch is in-process. Reset them so the scheduled worker can resume.
+ */
+export async function recoverInterruptedBulkCampaigns(): Promise<{
+  campaigns: number;
+  recipients: number;
+}> {
+  const recipients = await prisma.bulkCampaignRecipient.updateMany({
+    where: { status: BulkCampaignRecipientStatus.SENDING },
+    data: {
+      status: BulkCampaignRecipientStatus.PENDING,
+      lastError: "Recovered after server restart — will retry",
+    },
+  });
+  const campaigns = await prisma.bulkCampaign.updateMany({
+    where: { status: BulkCampaignStatus.RUNNING },
+    data: { status: BulkCampaignStatus.PENDING },
+  });
+  if (campaigns.count > 0 || recipients.count > 0) {
+    console.log(
+      `[bulk-campaigns] recovered ${campaigns.count} running campaign(s), ${recipients.count} sending recipient(s)`
+    );
+  }
+  return { campaigns: campaigns.count, recipients: recipients.count };
+}
 
 async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<ExecuteCampaignResult> {
   const {
@@ -1639,11 +1684,17 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
   } = args;
   let dispatched = 0;
   let consecutiveFailures = 0;
+  let stoppedByDailyCap = false;
+
+  // Final gate: only VERIFIED contacts may be sent; others become SKIPPED.
+  const verifiedPhones = await filterVerifiedFromContacts(workspaceId, phones);
+  await markFilteredOutRecipientsSkipped(workspaceId, campaignId, verifiedPhones);
+
   const recipientRows = await prisma.bulkCampaignRecipient.findMany({
     where: {
       campaignId,
       workspaceId,
-      phone: { in: phones },
+      phone: { in: verifiedPhones },
       status: BulkCampaignRecipientStatus.PENDING,
     },
     orderBy: { createdAt: "asc" },
@@ -1713,7 +1764,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
   if (!env.WHATSAPP_BRIDGE_ENABLED) {
     for (let i = 0; i < pendingRecipients.length; i += OUTBOUND_CHUNK) {
       const available = await waitWhilePaused();
-      if (!available) return { dispatched, stoppedByFailLimit: false };
+      if (!available) return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap: false };
       const slice = pendingRecipients.slice(i, i + OUTBOUND_CHUNK);
       const rows: Prisma.OutboundMessageCreateManyInput[] = slice.map((recipient, j) => {
         const globalIdx = i + j;
@@ -1748,18 +1799,18 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       });
       dispatched += rows.length;
     }
-    return { dispatched, stoppedByFailLimit: false };
+    return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap: false };
   }
 
   for (let i = 0; i < pendingRecipients.length; i++) {
     const available = await waitWhilePaused();
-    if (!available) return { dispatched, stoppedByFailLimit: false };
+    if (!available) return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
     const sendTimeAllowed = await waitUntilSendAllowed();
     if (!sendTimeAllowed || !(await campaignIsAvailable())) {
-      return { dispatched, stoppedByFailLimit: false };
+      return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
     }
     if (shouldStopByFailLimit(consecutiveFailures, antiBlock)) {
-      return { dispatched, stoppedByFailLimit: true };
+      return { dispatched, stoppedByFailLimit: true, stoppedByDailyCap };
     }
 
     const recipient = pendingRecipients[i]!;
@@ -1828,11 +1879,21 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
           : await buildTemplateWhatsAppContent(workspaceId, templateRow!);
 
       const trySend = async (devId: string) => {
-        const sock = await waSession.waitForOpenWaSocket(devId, workspaceId);
-        if (!sock) {
-          throw new Error("WhatsApp session offline — open Devices and reconnect.");
-        }
-        return sock.sendMessage(jid, outgoing);
+        return withDeviceOutboundGate(
+          devId,
+          {
+            minGapMs: WA_DEVICE_BULK_MIN_GAP_MS,
+            enforceDailyCap: true,
+            dailyCap: WA_DEVICE_DAILY_SEND_CAP,
+          },
+          async () => {
+            const sock = await waSession.waitForOpenWaSocket(devId, workspaceId);
+            if (!sock) {
+              throw new Error("WhatsApp session offline — open Devices and reconnect.");
+            }
+            return sock.sendMessage(jid, outgoing);
+          }
+        );
       };
 
       let usedDeviceId = primaryDeviceId;
@@ -1845,16 +1906,25 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
         if (attempts > 1) {
           const backoffMs = Math.min(30_000, 5_000 * (attempts - 1));
           const slept = await sleepWithCampaignChecks(backoffMs);
-          if (!slept) return { dispatched, stoppedByFailLimit: false };
+          if (!slept) return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
         }
         if (deviceMode === BulkDeviceMode.FAILOVER) {
-          for (const devId of deviceIds) {
+          for (let d = 0; d < deviceIds.length; d++) {
+            const devId = deviceIds[d]!;
             try {
               waMsg = await trySend(devId);
               usedDeviceId = devId;
               break;
             } catch (e) {
+              if (e instanceof DeviceDailyCapExceededError) {
+                lastErr = e;
+                continue;
+              }
               lastErr = e instanceof Error ? e : new Error(String(e));
+              if (d < deviceIds.length - 1) {
+                const slept = await sleepWithCampaignChecks(FAILOVER_DEVICE_GAP_MS);
+                if (!slept) return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
+              }
             }
           }
         } else {
@@ -1866,6 +1936,24 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
         }
       }
       if (!waMsg) {
+        if (lastErr instanceof DeviceDailyCapExceededError) {
+          stoppedByDailyCap = true;
+          await prisma.outboundMessage.update({
+            where: { id: row.id },
+            data: {
+              status: OutboundStatus.FAILED,
+              errorMessage: lastErr.message.slice(0, 500),
+            },
+          });
+          await prisma.bulkCampaignRecipient.update({
+            where: { id: recipient.id },
+            data: {
+              status: BulkCampaignRecipientStatus.PENDING,
+              lastError: lastErr.message.slice(0, 500),
+            },
+          });
+          return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap: true };
+        }
         throw lastErr ?? new Error("All send attempts failed");
       }
 
@@ -1896,6 +1984,24 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       });
       consecutiveFailures = 0;
     } catch (e) {
+      if (e instanceof DeviceDailyCapExceededError) {
+        stoppedByDailyCap = true;
+        await prisma.outboundMessage.update({
+          where: { id: row.id },
+          data: {
+            status: OutboundStatus.FAILED,
+            errorMessage: e.message.slice(0, 500),
+          },
+        });
+        await prisma.bulkCampaignRecipient.update({
+          where: { id: recipient.id },
+          data: {
+            status: BulkCampaignRecipientStatus.PENDING,
+            lastError: e.message.slice(0, 500),
+          },
+        });
+        return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap: true };
+      }
       const msg = e instanceof Error ? e.message : String(e);
       await prisma.outboundMessage.update({
         where: { id: row.id },
@@ -1916,16 +2022,19 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     }
 
     dispatched += 1;
-    if (antiBlock.enabled && dispatched % antiBlock.batchPauseEvery === 0) {
-      const slept = await sleepWithCampaignChecks(antiBlock.batchPauseSec * 1000);
-      if (!slept) return { dispatched, stoppedByFailLimit: false };
-    } else if (i < pendingRecipients.length - 1) {
-      const slept = await sleepWithCampaignChecks(randomDelayMs(delayMinSec, delayMaxSec));
-      if (!slept) return { dispatched, stoppedByFailLimit: false };
+
+    // Always apply inter-message delay; batch pause is additive (never replaces the delay).
+    if (i < pendingRecipients.length - 1) {
+      let pauseMs = randomDelayMs(delayMinSec, delayMaxSec);
+      if (dispatched % antiBlock.batchPauseEvery === 0) {
+        pauseMs += antiBlock.batchPauseSec * 1000;
+      }
+      const slept = await sleepWithCampaignChecks(pauseMs);
+      if (!slept) return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
     }
   }
 
-  return { dispatched, stoppedByFailLimit: false };
+  return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap };
 }
 
 function parseStoredPhones(value: Prisma.JsonValue): string[] {
@@ -1972,7 +2081,7 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
         {
           enabled: campaign.antiBlockEnabled,
           spintaxEnabled: campaign.spintaxEnabled,
-          verifyNumbers: campaign.verifyNumbers,
+          verifyNumbers: true,
           repliedOnly: campaign.repliedOnly,
           recent24hOnly: campaign.recent24hOnly,
           uniquenessMode: campaign.uniquenessMode,
@@ -2004,7 +2113,7 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
         antiBlock: {
           enabled: campaign.antiBlockEnabled,
           spintaxEnabled: campaign.spintaxEnabled,
-          verifyNumbers: campaign.verifyNumbers,
+          verifyNumbers: true,
           repliedOnly: campaign.repliedOnly,
           recent24hOnly: campaign.recent24hOnly,
           uniquenessMode: campaign.uniquenessMode,
@@ -2026,7 +2135,9 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
         where: { id: campaign.id, status: { not: BulkCampaignStatus.PAUSED } },
         data: {
           status:
-            result.stoppedByFailLimit || pendingLeft > 0
+            result.stoppedByFailLimit ||
+            result.stoppedByDailyCap ||
+            pendingLeft > 0
               ? BulkCampaignStatus.PAUSED
               : BulkCampaignStatus.COMPLETED,
         },
@@ -2045,6 +2156,9 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
 export function startBulkCampaignScheduledWorker(): void {
   if (scheduledLoopStarted) return;
   scheduledLoopStarted = true;
+  void recoverInterruptedBulkCampaigns().then(() => {
+    void runScheduledCampaignsOnce();
+  });
   setInterval(() => {
     void runScheduledCampaignsOnce();
   }, SCHEDULED_POLL_MS);

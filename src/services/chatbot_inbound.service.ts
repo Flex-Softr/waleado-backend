@@ -2,6 +2,10 @@ import type { ChatbotFlow, ChatbotFlowNode, Prisma } from "@prisma/client";
 import type { proto, WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
 import { matchAutoReplyTriggers } from "../lib/auto-reply-keywords";
+import {
+  WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
+  withDeviceOutboundGate,
+} from "../lib/wa-device-outbound-gate";
 import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
 import { generateOpenAiReply } from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
@@ -119,6 +123,7 @@ function messageBodyFromNode(node: ChatbotFlowNode): string {
 
 async function sendMessageNode(
   workspaceId: string,
+  deviceId: string,
   sock: WASocket,
   toJid: string,
   node: ChatbotFlowNode
@@ -141,12 +146,20 @@ async function sendMessageNode(
     });
     if (!tpl) return false;
     const content = await buildTemplateWhatsAppContent(workspaceId, tpl);
-    await sock.sendMessage(toJid, content);
+    await withDeviceOutboundGate(
+      deviceId,
+      { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+      () => sock.sendMessage(toJid, content)
+    );
     return true;
   }
   const text = messageBodyFromNode(node);
   if (!text) return false;
-  await sock.sendMessage(toJid, { text });
+  await withDeviceOutboundGate(
+    deviceId,
+    { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+    () => sock.sendMessage(toJid, { text })
+  );
   return true;
 }
 
@@ -219,7 +232,11 @@ export async function dispatchChatbotFlowForInbound(
         );
         if (resolved?.apiKey) {
           const aiText = await generateOpenAiReply(resolved, inboundText);
-          await sock.sendMessage(remoteJid, { text: aiText });
+          await withDeviceOutboundGate(
+            deviceId,
+            { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+            () => sock.sendMessage(remoteJid, { text: aiText })
+          );
           sentAny = true;
         }
       } catch (err) {
@@ -231,7 +248,13 @@ export async function dispatchChatbotFlowForInbound(
       for (const node of flow.nodes) {
         if (node.kind !== "MESSAGE") continue;
         try {
-          const sent = await sendMessageNode(workspaceId, sock, remoteJid, node);
+          const sent = await sendMessageNode(
+            workspaceId,
+            deviceId,
+            sock,
+            remoteJid,
+            node
+          );
           sentAny = sentAny || sent;
         } catch (err) {
           console.error("[chatbot] message node send failed", err);

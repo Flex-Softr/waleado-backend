@@ -8,6 +8,10 @@ import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { validateAndFormatPhone } from "../lib/phone";
 import { e164ToWhatsAppJid } from "../lib/whatsapp-jid";
+import {
+  WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
+  withDeviceOutboundGate,
+} from "../lib/wa-device-outbound-gate";
 import * as messaging from "./messaging.service";
 import * as waSession from "./wa-device-session.service";
 import { getAssetFilePath } from "./template-media-assets.service";
@@ -516,7 +520,11 @@ export async function sendLiveChatMessage(
     },
   });
   try {
-    const sent = await sock.sendMessage(jid, waPayload as never);
+    const sent = await withDeviceOutboundGate(
+      device.id,
+      { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+      () => sock.sendMessage(jid, waPayload as never)
+    );
     const providerRef = sent?.key?.id
       ? `${sent.key.remoteJid ?? jid}:${sent.key.id}`
       : "baileys";

@@ -55,6 +55,8 @@ const createBody = z
     delayMinSec: z.number().int().min(0).max(3600),
     delayMaxSec: z.number().int().min(0).max(3600),
     maxRetries: z.number().int().min(0).max(10),
+    // Anti-block defaults ON server-side (15s+ delays, fail-stop, daily caps).
+    // Pass antiBlock.enabled=false only if you intentionally disable filters.
     antiBlock: z
       .object({
         enabled: z.boolean().optional(),

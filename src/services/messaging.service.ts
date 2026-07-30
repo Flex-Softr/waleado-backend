@@ -4,6 +4,10 @@ import { AppError } from "../lib/errors";
 import { validateAndFormatPhone } from "../lib/phone";
 import { e164ToWhatsAppJid } from "../lib/whatsapp-jid";
 import { env } from "../env";
+import {
+  WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
+  withDeviceOutboundGate,
+} from "../lib/wa-device-outbound-gate";
 import { requireActiveTemplate } from "./templates.service";
 import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
 import * as waSession from "./wa-device-session.service";
@@ -191,7 +195,11 @@ export async function sendSingleMessage(
       kind === OutboundKind.TEXT
         ? { text: textToSend }
         : templateWaContent!;
-    const waMsg = await sock.sendMessage(jid, outgoing);
+    const waMsg = await withDeviceOutboundGate(
+      device.id,
+      { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+      () => sock.sendMessage(jid, outgoing)
+    );
     const key = waMsg?.key;
     const providerRef = key?.id
       ? `${key.remoteJid ?? jid}:${key.id}`

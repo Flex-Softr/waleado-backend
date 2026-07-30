@@ -1,4 +1,4 @@
-import { BulkUniquenessMode, Prisma } from "@prisma/client";
+import { BulkUniquenessMode, OutboundStatus, Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 
 export type BulkAntiBlockSettings = {
@@ -129,10 +129,12 @@ export async function applyWorkspaceUniquenessWindow(
 ): Promise<string[]> {
   if (phones.length === 0) return [];
   const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+  // Only successful sends count — FAILED/SIMULATED must not permanently block retries.
   const sentRows = await prisma.outboundMessage.findMany({
     where: {
       workspaceId,
       toPhone: { in: phones },
+      status: OutboundStatus.SENT,
       createdAt: { gte: since },
     },
     select: { toPhone: true },
@@ -204,11 +206,15 @@ export function randomDelayMs(minSec: number, maxSec: number): number {
   return sec * 1000;
 }
 
+/**
+ * Fail-streak stop is always enforced (even when anti-block UI is off)
+ * so a burst of WhatsApp errors pauses the campaign instead of burning the account.
+ */
 export function shouldStopByFailLimit(
   consecutiveFailures: number,
   settings: BulkAntiBlockSettings
 ): boolean {
-  return settings.enabled && consecutiveFailures >= settings.failLimitInRow;
+  return consecutiveFailures >= settings.failLimitInRow;
 }
 
 export function normalizeAntiBlock(
@@ -229,22 +235,29 @@ export function normalizeAntiBlock(
     timezone?: string | null;
   } | null
 ): BulkAntiBlockSettings {
+  // Default anti-block ON unless the client explicitly disables it.
+  const enabled = antiBlock?.enabled !== false;
   const uniquenessMode =
     antiBlock?.uniquenessMode === "campaign"
       ? BulkUniquenessMode.CAMPAIGN
-      : antiBlock?.uniquenessMode === "workspace_window"
-        ? BulkUniquenessMode.WORKSPACE_WINDOW
-        : BulkUniquenessMode.NONE;
+      : antiBlock?.uniquenessMode === "none"
+        ? BulkUniquenessMode.NONE
+        : antiBlock?.uniquenessMode === "workspace_window"
+          ? BulkUniquenessMode.WORKSPACE_WINDOW
+          : enabled
+            ? BulkUniquenessMode.WORKSPACE_WINDOW
+            : BulkUniquenessMode.NONE;
   return {
-    enabled: antiBlock?.enabled === true,
-    spintaxEnabled: antiBlock?.spintax === true,
-    verifyNumbers: antiBlock?.verifyNumbers === true,
+    enabled,
+    spintaxEnabled: antiBlock?.spintax !== false && enabled,
+    // Always require VERIFIED contacts for bulk sends (cannot be disabled).
+    verifyNumbers: true,
     repliedOnly: antiBlock?.repliedOnly === true,
     recent24hOnly: antiBlock?.recent24hOnly === true,
     uniquenessMode,
-    batchPauseEvery: Math.max(1, Math.floor(antiBlock?.batchPauseEvery ?? 30)),
-    batchPauseSec: Math.max(1, Math.floor(antiBlock?.batchPauseSec ?? 30)),
-    failLimitInRow: Math.max(1, Math.floor(antiBlock?.failLimitInRow ?? 5)),
+    batchPauseEvery: Math.max(1, Math.floor(antiBlock?.batchPauseEvery ?? 25)),
+    batchPauseSec: Math.max(15, Math.floor(antiBlock?.batchPauseSec ?? 60)),
+    failLimitInRow: Math.max(1, Math.floor(antiBlock?.failLimitInRow ?? 3)),
     activeHoursStart: antiBlock?.activeHoursStart?.trim() || null,
     activeHoursEnd: antiBlock?.activeHoursEnd?.trim() || null,
     inactiveHoursStart: antiBlock?.inactiveHoursStart?.trim() || null,
@@ -272,7 +285,7 @@ export function antiBlockApiFromRow(row: {
   return {
     enabled: row.antiBlockEnabled,
     spintax: row.spintaxEnabled,
-    verifyNumbers: row.verifyNumbers,
+    verifyNumbers: true,
     repliedOnly: row.repliedOnly,
     recent24hOnly: row.recent24hOnly,
     uniquenessMode:
@@ -298,15 +311,14 @@ export async function applyPhoneFilters(
   settings: BulkAntiBlockSettings
 ): Promise<string[]> {
   let out = phones;
+  // Always keep only VERIFIED workspace contacts — never send bulk to unverified numbers.
+  out = await filterVerifiedFromContacts(workspaceId, out);
   if (!settings.enabled) return out;
   if (settings.uniquenessMode === BulkUniquenessMode.CAMPAIGN) {
     out = applyUniqueness(out, settings.uniquenessMode);
   }
   if (settings.uniquenessMode === BulkUniquenessMode.WORKSPACE_WINDOW) {
     out = await applyWorkspaceUniquenessWindow(workspaceId, out);
-  }
-  if (settings.verifyNumbers) {
-    out = await filterVerifiedFromContacts(workspaceId, out);
   }
   if (settings.repliedOnly || settings.recent24hOnly) {
     out = await filterByReplyRules(workspaceId, out, {

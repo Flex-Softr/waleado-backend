@@ -7,6 +7,10 @@ import {
 } from "../lib/auto-reply-keywords";
 import { prisma } from "../lib/prisma";
 import { env } from "../env";
+import {
+  WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
+  withDeviceOutboundGate,
+} from "../lib/wa-device-outbound-gate";
 import { generateOpenAiReply } from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
 import {
@@ -366,7 +370,11 @@ export async function dispatchAutoRepliesForInbound(
     if (!payload) continue;
 
     try {
-      await sock.sendMessage(remoteJid, payload);
+      await withDeviceOutboundGate(
+        deviceId,
+        { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+        () => sock.sendMessage(remoteJid, payload)
+      );
       if (rule.cooldownMinutes > 0) {
         cooldownUntilByKey.set(
           cooldownKey,
