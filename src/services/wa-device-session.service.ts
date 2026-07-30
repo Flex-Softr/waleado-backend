@@ -47,9 +47,22 @@ export function deviceSessionPath(
   return path.join(sessionsBaseDir(), workspaceId, deviceId);
 }
 
+/**
+ * Extract E.164 from a WhatsApp JID.
+ * Own-device JIDs often include a device suffix (`8801…:1@s.whatsapp.net`).
+ */
 function jidToPhone(jid: string | undefined): string | null {
   if (!jid) return null;
-  const m = jid.match(/^(\d+)@/);
+  try {
+    const normalized = jidNormalizedUser(jid);
+    if (normalized) {
+      const m = normalized.match(/^(\d+)@/);
+      if (m) return `+${m[1]}`;
+    }
+  } catch {
+    /* fall through */
+  }
+  const m = jid.match(/^(\d+)(?::\d+)?@/);
   return m ? `+${m[1]}` : null;
 }
 
@@ -78,16 +91,48 @@ function toPhoneNetworkJid(raw: string | undefined): string | null {
 }
 
 /** Prefer creds.me.phoneNumber when me.id is a LID (LID digits are not E.164). */
-function ownPhoneFromCreds(sock: WASocket): string | null {
-  const me = sock.authState.creds.me;
-  const fromPn = toPhoneNetworkJid(me?.phoneNumber);
+function phoneFromAuthStateMe(me: {
+  id?: string;
+  phoneNumber?: string;
+} | null | undefined): string | null {
+  if (!me) return null;
+  const fromPn = toPhoneNetworkJid(me.phoneNumber);
   if (fromPn) return jidToPhone(fromPn);
 
-  const id = me?.id ?? sock.user?.id;
+  if (me.id && !isLidJid(me.id) && isPhoneNetworkJid(me.id)) {
+    return jidToPhone(me.id);
+  }
+  return null;
+}
+
+function ownPhoneFromCreds(sock: WASocket): string | null {
+  const fromMe = phoneFromAuthStateMe(sock.authState.creds.me);
+  if (fromMe) return fromMe;
+
+  const id = sock.user?.id;
   if (id && !isLidJid(id) && isPhoneNetworkJid(id)) {
     return jidToPhone(id);
   }
   return null;
+}
+
+function readPhoneFromCredsFile(
+  workspaceId: string,
+  deviceId: string
+): string | null {
+  try {
+    const credsPath = path.join(
+      deviceSessionPath(workspaceId, deviceId),
+      "creds.json"
+    );
+    if (!fs.existsSync(credsPath)) return null;
+    const raw = JSON.parse(fs.readFileSync(credsPath, "utf8")) as {
+      me?: { id?: string; phoneNumber?: string };
+    };
+    return phoneFromAuthStateMe(raw.me ?? null);
+  } catch {
+    return null;
+  }
 }
 
 const PROFILE_PIC_QUERY_MS = 14_000;
@@ -210,6 +255,31 @@ export async function fetchAndPersistProfilePicture(
     console.warn("[wa-session] persist profile picture URL failed", err);
   }
   return url;
+}
+
+/**
+ * Resolve the linked WhatsApp account phone from an open socket or saved creds,
+ * then persist it when found (backfills devices connected before phone parsing worked).
+ */
+export async function fetchAndPersistOwnPhone(
+  deviceId: string,
+  workspaceId: string
+): Promise<string | null> {
+  const sock = getOpenWaSocket(deviceId);
+  const phone =
+    (sock ? ownPhoneFromCreds(sock) : null) ??
+    readPhoneFromCredsFile(workspaceId, deviceId);
+  if (!phone) return null;
+
+  try {
+    await prisma.device.update({
+      where: { id: deviceId },
+      data: { phone },
+    });
+  } catch (err) {
+    console.warn("[wa-session] persist own phone failed", err);
+  }
+  return phone;
 }
 
 export function getWaQr(deviceId: string): string | null {
@@ -470,7 +540,7 @@ export async function ensureWaDeviceSession(
               where: { id: deviceId },
               data: {
                 status: DeviceStatus.CONNECTED,
-                phone,
+                ...(phone ? { phone } : {}),
               },
             })
             .catch((err) => {
@@ -525,7 +595,18 @@ export async function ensureWaDeviceSession(
         }
       });
 
-      sock.ev.on("creds.update", saveCreds);
+      sock.ev.on("creds.update", () => {
+        void saveCreds().then(() => {
+          const phone = ownPhoneFromCreds(sock);
+          if (!phone) return;
+          return prisma.device.update({
+            where: { id: deviceId },
+            data: { phone },
+          });
+        }).catch((err) => {
+          console.warn("[wa-session] creds.update phone persist failed", err);
+        });
+      });
 
       sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (!messages?.length) return;

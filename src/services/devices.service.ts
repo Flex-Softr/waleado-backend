@@ -84,7 +84,18 @@ export async function listDevices(workspaceId: string): Promise<DeviceJson[]> {
 
   const mapped = await Promise.all(
     rows.map(async (row) => {
-      const json = deviceToJson(row);
+      let json = deviceToJson(row);
+
+      if (row.status === DeviceStatus.CONNECTED && !row.phone) {
+        const phone = await waSession.fetchAndPersistOwnPhone(
+          row.id,
+          row.workspaceId
+        );
+        if (phone) {
+          json = { ...json, phone };
+        }
+      }
+
       if (
         row.status !== DeviceStatus.CONNECTED ||
         row.profilePictureUrl != null

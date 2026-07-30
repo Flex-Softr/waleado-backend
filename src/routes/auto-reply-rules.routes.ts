@@ -20,15 +20,22 @@ const messageModeSchema = z.enum(["text", "template", "media"]);
 
 const openAiSettingsSchema = z
   .object({
-    apiKey: z.string().min(1),
-    model: z.string().optional(),
+    credentialId: z.string().uuid().optional(),
+    /** Legacy pasted key — still accepted for dual-read of old rules */
+    apiKey: z.string().min(1).optional(),
+    model: z.string().min(1).max(200).optional(),
     baseUrl: z.string().max(500).optional(),
     systemPrompt: z.string().max(8000).optional(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().int().positive().optional().nullable(),
     continuousChat: z.boolean().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (o) =>
+      Boolean(o.credentialId?.trim()) || Boolean(o.apiKey?.trim()),
+    { message: "credentialId or apiKey is required" }
+  );
 
 const createBody = z.object({
   name: z.string().min(1).max(200),

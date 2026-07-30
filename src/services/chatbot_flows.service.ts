@@ -2,6 +2,10 @@ import { ChatbotFlowNodeKind, Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { requireActiveTemplate } from "./templates.service";
+import {
+  assertValidAiSettings,
+  sanitizeAiSettingsForResponse,
+} from "./ai_credential_resolve.service";
 
 export type ChatbotFlowNodeJson = {
   id: string;
@@ -25,6 +29,8 @@ export type ChatbotFlowListItemJson = {
   cooldownMinutes: number;
   active: boolean;
   conversationCount: number;
+  aiEnabled: boolean;
+  aiSettings: Record<string, unknown> | null;
   nodes: ChatbotFlowNodeJson[];
   createdAt: string;
   updatedAt: string;
@@ -92,6 +98,8 @@ function flowToJson(row: {
   cooldownMinutes: number;
   active: boolean;
   conversationCount: number;
+  aiEnabled: boolean;
+  aiSettings: Prisma.JsonValue | null;
   createdAt: Date;
   updatedAt: Date;
   device: { name: string; phone: string | null };
@@ -114,6 +122,8 @@ function flowToJson(row: {
     cooldownMinutes: row.cooldownMinutes,
     active: row.active,
     conversationCount: row.conversationCount,
+    aiEnabled: row.aiEnabled,
+    aiSettings: sanitizeAiSettingsForResponse(row.aiSettings),
     nodes: sorted.map(nodeToJson),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -186,6 +196,8 @@ export async function createChatbotFlow(
     triggerKeywords: string;
     cooldownMinutes: number;
     active: boolean;
+    aiEnabled?: boolean;
+    aiSettings?: unknown;
     nodes: FlowNodeInput[];
   }
 ): Promise<ChatbotFlowListItemJson> {
@@ -205,6 +217,13 @@ export async function createChatbotFlow(
     throw new AppError(400, "Trigger keywords are required", "VALIDATION");
   }
 
+  const aiEnabled = Boolean(input.aiEnabled);
+  if (aiEnabled) {
+    await assertValidAiSettings(workspaceId, input.aiSettings, {
+      allowLegacyApiKey: false,
+    });
+  }
+
   await validateNodes(workspaceId, input.nodes);
 
   const flow = await prisma.$transaction(async (tx) => {
@@ -217,6 +236,11 @@ export async function createChatbotFlow(
         triggerKeywords: kw.slice(0, 1000),
         cooldownMinutes: Math.min(10080, Math.max(0, input.cooldownMinutes)),
         active: input.active,
+        aiEnabled,
+        aiSettings:
+          input.aiSettings === undefined || input.aiSettings === null
+            ? Prisma.JsonNull
+            : (input.aiSettings as Prisma.InputJsonValue),
       },
     });
 
@@ -254,6 +278,8 @@ export async function updateChatbotFlow(
     triggerKeywords?: string;
     cooldownMinutes?: number;
     active?: boolean;
+    aiEnabled?: boolean;
+    aiSettings?: unknown;
     nodes?: FlowNodeInput[];
   }
 ): Promise<ChatbotFlowListItemJson> {
@@ -277,6 +303,16 @@ export async function updateChatbotFlow(
 
   if (input.nodes) {
     await validateNodes(workspaceId, input.nodes);
+  }
+
+  const mergedAiEnabled =
+    input.aiEnabled !== undefined ? input.aiEnabled : existing.aiEnabled;
+  if (mergedAiEnabled) {
+    const settings =
+      input.aiSettings !== undefined ? input.aiSettings : existing.aiSettings;
+    await assertValidAiSettings(workspaceId, settings, {
+      allowLegacyApiKey: false,
+    });
   }
 
   const flow = await prisma.$transaction(async (tx) => {
@@ -303,6 +339,15 @@ export async function updateChatbotFlow(
     }
     if (input.active !== undefined) {
       data.active = input.active;
+    }
+    if (input.aiEnabled !== undefined) {
+      data.aiEnabled = input.aiEnabled;
+    }
+    if (input.aiSettings !== undefined) {
+      data.aiSettings =
+        input.aiSettings === null
+          ? Prisma.JsonNull
+          : (input.aiSettings as Prisma.InputJsonValue);
     }
 
     await tx.chatbotFlow.update({

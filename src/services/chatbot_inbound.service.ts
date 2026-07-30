@@ -1,8 +1,10 @@
-import type { ChatbotFlow, ChatbotFlowNode, MessageTemplate, Prisma } from "@prisma/client";
+import type { ChatbotFlow, ChatbotFlowNode, Prisma } from "@prisma/client";
 import type { proto, WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
 import { matchAutoReplyTriggers } from "../lib/auto-reply-keywords";
 import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
+import { generateOpenAiReply } from "./openai_auto_reply.service";
+import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
 
 type MessageUpsertKind = "notify" | "append";
 
@@ -208,13 +210,32 @@ export async function dispatchChatbotFlowForInbound(
     }
 
     let sentAny = false;
-    for (const node of flow.nodes) {
-      if (node.kind !== "MESSAGE") continue;
+
+    if (flow.aiEnabled && flow.aiSettings) {
       try {
-        const sent = await sendMessageNode(workspaceId, sock, remoteJid, node);
-        sentAny = sentAny || sent;
+        const resolved = await resolveAiSettingsToOpenAiInput(
+          workspaceId,
+          flow.aiSettings
+        );
+        if (resolved?.apiKey) {
+          const aiText = await generateOpenAiReply(resolved, inboundText);
+          await sock.sendMessage(remoteJid, { text: aiText });
+          sentAny = true;
+        }
       } catch (err) {
-        console.error("[chatbot] message node send failed", err);
+        console.error("[chatbot] AI reply failed, using message nodes", err);
+      }
+    }
+
+    if (!sentAny) {
+      for (const node of flow.nodes) {
+        if (node.kind !== "MESSAGE") continue;
+        try {
+          const sent = await sendMessageNode(workspaceId, sock, remoteJid, node);
+          sentAny = sentAny || sent;
+        } catch (err) {
+          console.error("[chatbot] message node send failed", err);
+        }
       }
     }
     if (!sentAny) continue;

@@ -47,7 +47,8 @@ function destinationJidForInbound(m: WAMessage): string | null {
 }
 
 function phoneFromJid(jid: string): string | null {
-  const m = jid.match(/^(\d+)@/);
+  // Device-linked JIDs may look like `8801…:1@s.whatsapp.net`.
+  const m = jid.match(/^(\d+)(?::\d+)?@/);
   return m ? `+${m[1]}` : null;
 }
 

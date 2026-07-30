@@ -55,6 +55,9 @@ export async function generateOpenAiReply(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
+      // OpenRouter recommends these; harmless for Gemini / other OpenAI-compat APIs.
+      "HTTP-Referer": "https://leadwhats.app",
+      "X-Title": "LeadWhats",
     },
     body: JSON.stringify(body),
   });
@@ -67,11 +70,32 @@ export async function generateOpenAiReply(
   }
 
   const data = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: unknown } }[];
   };
-  const text = data.choices?.[0]?.message?.content?.trim();
+  const text = extractMessageContent(data.choices?.[0]?.message?.content);
   if (!text) {
     throw new Error("OpenAI returned empty content");
   }
   return text.slice(0, 4096);
+}
+
+function extractMessageContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object") {
+          const o = part as { text?: unknown; content?: unknown };
+          if (typeof o.text === "string") return o.text;
+          if (typeof o.content === "string") return o.content;
+        }
+        return "";
+      })
+      .join("");
+    return parts.trim();
+  }
+  return "";
 }

@@ -7,7 +7,8 @@ import {
 } from "../lib/auto-reply-keywords";
 import { prisma } from "../lib/prisma";
 import { env } from "../env";
-import { generateOpenAiReply, type OpenAiSettingsInput } from "./openai_auto_reply.service";
+import { generateOpenAiReply } from "./openai_auto_reply.service";
+import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
 import {
   buildAutoReplyMediaContent,
   buildTemplateWhatsAppContent,
@@ -191,21 +192,6 @@ function replyBodyForRule(rule: {
   return rule.response.trim();
 }
 
-function parseOpenAiJson(raw: unknown): OpenAiSettingsInput | null {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const o = raw as Record<string, unknown>;
-  const apiKey = typeof o.apiKey === "string" ? o.apiKey : "";
-  if (!apiKey.trim()) return null;
-  return {
-    apiKey,
-    model: typeof o.model === "string" ? o.model : undefined,
-    baseUrl: typeof o.baseUrl === "string" ? o.baseUrl : undefined,
-    systemPrompt: typeof o.systemPrompt === "string" ? o.systemPrompt : undefined,
-    temperature: typeof o.temperature === "number" ? o.temperature : undefined,
-    maxTokens: typeof o.maxTokens === "number" ? o.maxTokens : null,
-  };
-}
-
 type AutoReplyRuleRow = AutoReplyRule & {
   template: MessageTemplate | null;
 };
@@ -216,14 +202,24 @@ async function buildAutoReplyPayload(
   inboundText: string
 ): Promise<AnyMessageContent | null> {
   if (rule.openAiEnabled && rule.openAiSettings) {
-    const parsed = parseOpenAiJson(rule.openAiSettings);
-    if (parsed?.apiKey) {
+    const resolved = await resolveAiSettingsToOpenAiInput(
+      workspaceId,
+      rule.openAiSettings
+    );
+    if (resolved?.apiKey) {
       try {
-        const aiText = await generateOpenAiReply(parsed, inboundText);
+        const aiText = await generateOpenAiReply(resolved, inboundText);
         return { text: aiText };
       } catch (e) {
-        console.error("[auto-reply] OpenAI failed, using fallback", e);
+        console.error(
+          "[auto-reply] AI reply failed, using fallback",
+          e instanceof Error ? e.message : e
+        );
       }
+    } else {
+      console.error(
+        "[auto-reply] AI enabled but credentials could not be resolved; using fallback"
+      );
     }
   }
 

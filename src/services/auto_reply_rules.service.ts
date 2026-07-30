@@ -11,6 +11,10 @@ import {
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { requireActiveTemplate } from "./templates.service";
+import {
+  assertValidAiSettings,
+  sanitizeAiSettingsForResponse,
+} from "./ai_credential_resolve.service";
 
 /** API ↔ Prisma trigger type (REST uses snake_case strings). */
 export type AutoReplyTriggerTypeApi =
@@ -40,7 +44,7 @@ export type AutoReplyRuleJson = {
   mediaCaption: string | null;
   response: string;
   openAiEnabled: boolean;
-  openAiSettings: Prisma.JsonValue | null;
+  openAiSettings: Record<string, unknown> | null;
   active: boolean;
   responseCount: number;
   createdAt: string;
@@ -212,7 +216,7 @@ function toJson(row: {
     mediaCaption: row.mediaCaption,
     response: row.response,
     openAiEnabled: row.openAiEnabled,
-    openAiSettings: row.openAiSettings,
+    openAiSettings: sanitizeAiSettingsForResponse(row.openAiSettings),
     active: row.active,
     responseCount: row.responseCount,
     createdAt: row.createdAt.toISOString(),
@@ -303,18 +307,9 @@ export async function createAutoReplyRule(
   });
 
   if (input.openAiEnabled) {
-    const raw = input.openAiSettings;
-    const key =
-      raw && typeof raw === "object" && !Array.isArray(raw)
-        ? (raw as { apiKey?: unknown }).apiKey
-        : undefined;
-    if (typeof key !== "string" || !key.trim()) {
-      throw new AppError(
-        400,
-        "OpenAI settings with apiKey are required when AI is enabled",
-        "VALIDATION"
-      );
-    }
+    await assertValidAiSettings(workspaceId, input.openAiSettings, {
+      allowLegacyApiKey: true,
+    });
   }
 
   const row = await prisma.autoReplyRule.create({
@@ -495,19 +490,9 @@ export async function updateAutoReplyRule(
       input.openAiSettings !== undefined
         ? input.openAiSettings
         : existing.openAiSettings;
-    if (
-      settings === null ||
-      (typeof settings === "object" &&
-        settings !== null &&
-        (typeof (settings as { apiKey?: unknown }).apiKey !== "string" ||
-          !(settings as { apiKey: string }).apiKey.trim()))
-    ) {
-      throw new AppError(
-        400,
-        "OpenAI settings with apiKey are required when AI is enabled",
-        "VALIDATION"
-      );
-    }
+    await assertValidAiSettings(workspaceId, settings, {
+      allowLegacyApiKey: true,
+    });
   }
 
   const row = await prisma.autoReplyRule.update({

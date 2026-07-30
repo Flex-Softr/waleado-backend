@@ -140,6 +140,11 @@ enum LiveChatContentKind {
   UNKNOWN
 }
 
+enum AiProvider {
+  GEMINI
+  OPENROUTER
+}
+
 model User {
   id                  String               @id @default(uuid())
   email               String               @unique
@@ -212,6 +217,7 @@ model Workspace {
   callResponderRules     CallResponderRule[]
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
+  aiCredentials          AiCredential[]
 }
 
 /**
@@ -269,12 +275,40 @@ model ChatbotFlow {
   cooldownMinutes   Int               @default(0)
   active            Boolean           @default(true)
   conversationCount Int               @default(0)
+  aiEnabled         Boolean           @default(false)
+  /**
+   * AI settings: credentialId, model, systemPrompt?, temperature?, maxTokens?
+   */
+  aiSettings        Json?
   nodes             ChatbotFlowNode[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
   @@index([workspaceId])
   @@index([deviceId])
+}
+
+model AiCredential {
+  id          String     @id @default(uuid())
+  workspaceId String
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  provider    AiProvider
+  apiKey      String
+  /**
+   * Catalog model id or provider model string (validated against allowlist).
+   */
+  model       String
+  /**
+   * OpenAI-compatible API base URL (e.g. https://openrouter.ai/api/v1). Null uses provider default.
+   */
+  apiEndpoint String?
+  active      Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
 }
 
 model ChatbotFlowNode {
@@ -353,7 +387,8 @@ model AutoReplyRule {
   response        String               @db.Text
   openAiEnabled   Boolean              @default(false)
   /**
-   * OpenAI-compatible API settings (apiKey, model, baseUrl, systemPrompt, temperature, maxTokens, continuousChat).
+   * Preferred: credentialId + model (+ systemPrompt, temperature, maxTokens, continuousChat).
+   * Legacy: apiKey + model + baseUrl (+ same optionals).
    */
   openAiSettings  Json?
   active          Boolean              @default(true)

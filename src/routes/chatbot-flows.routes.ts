@@ -16,6 +16,16 @@ const nodeSchema = z.object({
   payload: z.record(z.string(), z.unknown()).optional().nullable(),
 });
 
+const aiSettingsSchema = z
+  .object({
+    credentialId: z.string().uuid(),
+    model: z.string().min(1).max(200).optional(),
+    systemPrompt: z.string().max(8000).optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    maxTokens: z.number().int().positive().optional().nullable(),
+  })
+  .passthrough();
+
 const createBody = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional().default(""),
@@ -23,6 +33,8 @@ const createBody = z.object({
   triggerKeywords: z.string().min(1).max(1000),
   cooldownMinutes: z.number().int().min(0).max(10080),
   active: z.boolean(),
+  aiEnabled: z.boolean().optional().default(false),
+  aiSettings: aiSettingsSchema.optional().nullable(),
   nodes: z.array(nodeSchema).max(100),
 });
 
@@ -34,6 +46,8 @@ const patchBody = z
     triggerKeywords: z.string().min(1).max(1000).optional(),
     cooldownMinutes: z.number().int().min(0).max(10080).optional(),
     active: z.boolean().optional(),
+    aiEnabled: z.boolean().optional(),
+    aiSettings: aiSettingsSchema.optional().nullable(),
     nodes: z.array(nodeSchema).max(100).optional(),
   })
   .refine((o) => Object.keys(o).length > 0, {

@@ -17,6 +17,10 @@ import { chatbotFlowsRouter } from "./routes/chatbot-flows.routes";
 import { liveChatRouter } from "./routes/live-chat.routes";
 import { groupGrabberRouter } from "./routes/group-grabber.routes";
 import { dashboardRouter } from "./routes/dashboard.routes";
+import {
+  aiCatalogRouter,
+  aiCredentialsRouter,
+} from "./routes/ai-credentials.routes";
 import { healthRouter } from "./routes/health.routes";
 import { publicRouter } from "./routes/public.routes";
 import { authRouter } from "./routes/auth.routes";
@@ -96,6 +100,8 @@ app.use("/v1/chatbot-flows", chatbotFlowsRouter);
 app.use("/v1/live-chat", liveChatRouter);
 app.use("/v1/group-grabber", groupGrabberRouter);
 app.use("/v1/dashboard", dashboardRouter);
+app.use("/v1/ai-credentials", aiCredentialsRouter);
+app.use("/v1/ai", aiCatalogRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Not found" } });
