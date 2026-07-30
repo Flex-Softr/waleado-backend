@@ -4,6 +4,7 @@ import type {
   WASocket,
 } from "@whiskeysockets/baileys";
 import { DeviceStatus } from "@prisma/client";
+import * as XLSX from "xlsx";
 import { env } from "../env";
 import { AppError } from "../lib/errors";
 import { prisma } from "../lib/prisma";
@@ -342,7 +343,7 @@ export async function scrapeGroupMembers(
   deviceId: string,
   groupJid: string,
   options?: { excludeAdmins?: boolean }
-): Promise<{ members: WaGroupMemberJson[] }> {
+): Promise<{ groupName: string; members: WaGroupMemberJson[] }> {
   const trimmed = groupJid.trim();
   if (!trimmed || !trimmed.endsWith("@g.us")) {
     throw new AppError(400, "Invalid WhatsApp group JID", "VALIDATION");
@@ -383,5 +384,142 @@ export async function scrapeGroupMembers(
     isAdmin: isParticipantAdmin(p),
   }));
 
-  return { members };
+  return {
+    groupName: (meta.subject || "Unnamed group").slice(0, 200),
+    members,
+  };
+}
+
+export type GrabberExportFormat = "csv" | "xlsx";
+
+export type GrabberExportMemberInput = {
+  name?: string;
+  phone?: string | null;
+  jid?: string;
+  isAdmin?: boolean;
+};
+
+export type GrabberExportResult = {
+  filename: string;
+  contentType: string;
+  body: Buffer;
+};
+
+type GrabberExportRecord = {
+  Name: string;
+  Phone: string;
+  Admin: string;
+  JID: string;
+};
+
+/**
+ * Build a CSV/XLSX download from already-scraped group members (same payload shape as import).
+ */
+export function exportGrabbedMembers(input: {
+  format: GrabberExportFormat;
+  groupName?: string;
+  members: GrabberExportMemberInput[];
+  /** When true, rows without a phone number are omitted. */
+  onlyWithPhone?: boolean;
+}): GrabberExportResult {
+  if (!input.members.length) {
+    throw new AppError(400, "No members to export", "VALIDATION");
+  }
+
+  let rows = input.members;
+  if (input.onlyWithPhone) {
+    rows = rows.filter((m) => (m.phone ?? "").trim().length > 0);
+    if (!rows.length) {
+      throw new AppError(
+        400,
+        "No members with phone numbers to export",
+        "VALIDATION"
+      );
+    }
+  }
+
+  const records: GrabberExportRecord[] = rows.map((m) => ({
+    Name: (m.name?.trim() || "Contact").slice(0, 200),
+    Phone: (m.phone ?? "").trim(),
+    Admin: m.isAdmin === true ? "Yes" : "No",
+    JID: (m.jid ?? "").trim(),
+  }));
+
+  const filename = `${slugifyFilename(input.groupName || "group-members")}-members.${input.format}`;
+
+  if (input.format === "csv") {
+    return {
+      filename,
+      contentType: "text/csv; charset=utf-8",
+      body: Buffer.from(recordsToCsv(records), "utf8"),
+    };
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(records, {
+    header: ["Name", "Phone", "Admin", "JID"],
+  });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Members");
+  return {
+    filename,
+    contentType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    body: XLSX.write(workbook, { bookType: "xlsx", type: "buffer" }) as Buffer,
+  };
+}
+
+/**
+ * Scrape a WhatsApp group and return members as a CSV/XLSX download.
+ */
+export async function scrapeAndExportGroupMembers(
+  workspaceId: string,
+  deviceId: string,
+  groupJid: string,
+  options: {
+    format: GrabberExportFormat;
+    excludeAdmins?: boolean;
+    onlyWithPhone?: boolean;
+    groupName?: string;
+  }
+): Promise<GrabberExportResult> {
+  const scraped = await scrapeGroupMembers(workspaceId, deviceId, groupJid, {
+    excludeAdmins: options.excludeAdmins,
+  });
+
+  return exportGrabbedMembers({
+    format: options.format,
+    groupName:
+      options.groupName?.trim() || scraped.groupName || "group-members",
+    members: scraped.members,
+    onlyWithPhone: options.onlyWithPhone,
+  });
+}
+
+function slugifyFilename(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "group-members"
+  );
+}
+
+function recordsToCsv(records: GrabberExportRecord[]): string {
+  const headers: (keyof GrabberExportRecord)[] = [
+    "Name",
+    "Phone",
+    "Admin",
+    "JID",
+  ];
+  return [headers, ...records.map((r) => headers.map((h) => r[h]))]
+    .map((row) => row.map(escapeCsvCell).join(","))
+    .join("\n");
+}
+
+function escapeCsvCell(value: string): string {
+  const normalized = value.replace(/\r?\n/g, " ");
+  return /[",\n]/.test(normalized)
+    ? `"${normalized.replace(/"/g, '""')}"`
+    : normalized;
 }

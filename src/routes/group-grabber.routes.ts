@@ -27,6 +27,28 @@ const importBody = z.object({
     .max(2000),
 });
 
+const exportMemberRow = z.object({
+  name: z.string().max(200).optional(),
+  phone: z.string().max(32).nullable().optional(),
+  jid: z.string().max(120).optional(),
+  isAdmin: z.boolean().optional(),
+});
+
+const exportMembersBody = z.object({
+  format: z.enum(["csv", "xlsx"]).default("xlsx"),
+  groupName: z.string().max(200).optional(),
+  onlyWithPhone: z.boolean().optional(),
+  members: z.array(exportMemberRow).min(1).max(5000),
+});
+
+const scrapeExportBody = z.object({
+  groupJid: z.string().min(5).max(120),
+  format: z.enum(["csv", "xlsx"]).default("xlsx"),
+  excludeAdmins: z.boolean().optional(),
+  onlyWithPhone: z.boolean().optional(),
+  groupName: z.string().max(200).optional(),
+});
+
 function asyncHandler(
   fn: (req: AuthedRequest, res: import("express").Response) => Promise<void>
 ) {
@@ -85,6 +107,60 @@ router.post(
       }))
     );
     res.status(201).json(out);
+  })
+);
+
+/** Export already-scraped members to CSV/XLSX (default: Excel). */
+router.post(
+  "/export-members",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const body = exportMembersBody.parse(req.body);
+    const out = grabber.exportGrabbedMembers({
+      format: body.format,
+      groupName: body.groupName,
+      onlyWithPhone: body.onlyWithPhone === true,
+      members: body.members,
+    });
+    res.setHeader("Content-Type", out.contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${out.filename}"`
+    );
+    res.send(out.body);
+  })
+);
+
+/** Scrape a group and download members as CSV/XLSX in one step. */
+router.post(
+  "/devices/:deviceId/export-members",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const { deviceId } = z.object({ deviceId: z.string().uuid() }).parse(req.params);
+    const body = scrapeExportBody.parse(req.body);
+    const out = await grabber.scrapeAndExportGroupMembers(
+      auth.wid,
+      deviceId,
+      body.groupJid,
+      {
+        format: body.format,
+        excludeAdmins: body.excludeAdmins === true,
+        onlyWithPhone: body.onlyWithPhone === true,
+        groupName: body.groupName,
+      }
+    );
+    res.setHeader("Content-Type", out.contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${out.filename}"`
+    );
+    res.send(out.body);
   })
 );
 
