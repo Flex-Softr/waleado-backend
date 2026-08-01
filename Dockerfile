@@ -1,25 +1,36 @@
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
+
 COPY package.json package-lock.json ./
+COPY patches ./patches
+
 RUN npm ci
 
-FROM deps AS builder
+FROM node:24-alpine AS builder
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY --from=deps /app/node_modules ./node_modules
 COPY tsconfig.json ./
 COPY prisma ./prisma
 COPY src ./src
+
 RUN npx prisma generate
 RUN npm run build
+RUN npm prune --omit=dev && npm cache clean --force
 
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci && npm cache clean --force
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
-
 ENV NODE_ENV=production
+
+COPY package.json ./
+COPY --from=builder --chown=node:node /app/dist ./dist
+COPY --from=builder --chown=node:node /app/prisma ./prisma
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+
+USER node
+
 EXPOSE 5001
-CMD ["npm", "start"]
+CMD ["node", "dist/index.js"]
+
