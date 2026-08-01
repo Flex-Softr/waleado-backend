@@ -15,8 +15,8 @@ import {
 import { dispatchChatbotFlowForInbound } from "./chatbot_inbound.service";
 import { ingestInboundLiveChatMessages } from "./live_chat_inbound_ingest.service";
 
-/** Repo root: `server/src/services` → `../../../` */
-const REPO_ROOT = path.resolve(__dirname, "../../..");
+/** Repo root: `src/services` (or `dist/services`) → `../..` */
+const REPO_ROOT = path.resolve(__dirname, "../..");
 
 const silentLogger = pino({ level: "silent" });
 
