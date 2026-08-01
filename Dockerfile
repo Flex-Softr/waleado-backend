@@ -24,10 +24,15 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY package.json ./
+COPY --chown=node:node package.json ./
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/prisma ./prisma
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+
+# Baileys auth + uploads need write access; /app itself is root-owned.
+# Creating these as root before USER node also seeds ownership for named volumes.
+RUN mkdir -p /app/.wa-sessions /app/uploads/template-media \
+  && chown -R node:node /app/.wa-sessions /app/uploads
 
 USER node
 
