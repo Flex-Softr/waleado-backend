@@ -38,6 +38,7 @@
     "nodemailer": "^9.0.1",
     "pino": "^9.9.0",
     "pino-http": "^10.5.0",
+    "prisma": "^6.19.0",
     "stripe": "^17.4.0",
     "xlsx": "^0.18.5",
     "zod": "^3.25.76"
@@ -52,7 +53,6 @@
     "@types/node": "^20.14.0",
     "@types/nodemailer": "^8.0.1",
     "patch-package": "^8.0.1",
-    "prisma": "^6.19.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
