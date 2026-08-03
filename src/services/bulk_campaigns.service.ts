@@ -42,6 +42,14 @@ import {
   WA_DEVICE_DAILY_SEND_CAP,
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
+import { maxBulkMessageContentsForPlan } from "../lib/plan-limits";
+import {
+  generateAiRewriteVariants,
+  normalizeBodyTexts,
+  parseStoredBodyTexts,
+  pickRandomBodyText,
+  type BulkAiRewriteInput,
+} from "./bulk_message_variants.service";
 
 const MAX_RECIPIENTS = 2000;
 const OUTBOUND_CHUNK = 250;
@@ -93,7 +101,10 @@ export type CreateBulkCampaignPayload = {
   /** Load distribution across selected devices. */
   deviceMode: "single" | "failover" | "round_robin";
   kind: "text" | "template";
+  /** @deprecated Prefer bodyTexts; kept for backward compatibility. */
   bodyText?: string;
+  /** Custom message contents (plan-capped; AI rewrites append to this pool). */
+  bodyTexts?: string[];
   templateId?: string;
   selectionMode: "groups" | "all_verified" | "manual";
   groupIds?: string[];
@@ -108,6 +119,8 @@ export type CreateBulkCampaignPayload = {
   /** Random delay upper bound (seconds). */
   delayMaxSec: number;
   maxRetries: number;
+  /** Generate AI rewrite variants at create time (TEXT only). */
+  aiRewrite?: BulkAiRewriteInput;
   antiBlock?: {
     enabled?: boolean;
     spintax?: boolean;
@@ -263,6 +276,8 @@ export type BulkCampaignDetailJson = {
   campaign: BulkCampaignListItemJson;
   template: { id: string; name: string; typeId: string } | null;
   messagePreview: string | null;
+  /** Final TEXT message pool (custom + AI). Empty/null for template campaigns. */
+  bodyTexts: string[] | null;
   devices: BulkCampaignDeviceRowJson[];
   deviceSendStats: BulkCampaignDeviceSendStatsJson[];
   stats: BulkCampaignOutboundStatsJson;
@@ -512,9 +527,15 @@ export async function getBulkCampaignDetail(
     })
   );
 
+  const bodyTextsPool =
+    campaign.kind === OutboundKind.TEXT
+      ? parseStoredBodyTexts(campaign.bodyTexts, campaign.bodyText)
+      : [];
   const messagePreview =
     campaign.kind === OutboundKind.TEXT
-      ? (campaign.bodyText?.trim().slice(0, 500) ?? null)
+      ? (bodyTextsPool[0]?.slice(0, 500) ??
+          campaign.bodyText?.trim().slice(0, 500) ??
+          null)
       : null;
 
   const snapshotSent = recipientCountFor(BulkCampaignRecipientStatus.SENT);
@@ -600,6 +621,12 @@ export async function getBulkCampaignDetail(
         }
       : null,
     messagePreview,
+    bodyTexts:
+      campaign.kind === OutboundKind.TEXT
+        ? bodyTextsPool.length > 0
+          ? bodyTextsPool
+          : null
+        : null,
     devices,
     deviceSendStats,
     stats,
@@ -862,6 +889,11 @@ export async function createRetryCampaignFromRecipients(
     ? input.deviceIds
     : parseStoredDeviceIds(campaign.deviceIds);
 
+  const retryBodyTexts = parseStoredBodyTexts(
+    campaign.bodyTexts,
+    campaign.bodyText
+  );
+
   return createBulkCampaign(workspaceId, {
     name:
       input.name?.trim() ||
@@ -869,7 +901,11 @@ export async function createRetryCampaignFromRecipients(
     deviceIds,
     deviceMode: input.deviceMode ?? deviceModeApi(campaign.deviceMode),
     kind: campaign.kind === OutboundKind.TEXT ? "text" : "template",
-    bodyText: campaign.bodyText ?? undefined,
+    bodyText: retryBodyTexts[0] ?? campaign.bodyText ?? undefined,
+    bodyTexts:
+      campaign.kind === OutboundKind.TEXT && retryBodyTexts.length > 0
+        ? retryBodyTexts
+        : undefined,
     templateId: campaign.templateId ?? undefined,
     selectionMode: "manual",
     manualPhones: phones,
@@ -1393,17 +1429,48 @@ export async function createBulkCampaign(
 
   let templateId: string | null = null;
   let bodyText: string | null = null;
+  let bodyTexts: string[] | null = null;
   let kind: OutboundKind;
 
   if (payload.kind === "text") {
-    const text = payload.bodyText?.trim() ?? "";
-    if (!text) {
+    const customTexts = normalizeBodyTexts({
+      bodyText: payload.bodyText,
+      bodyTexts: payload.bodyTexts,
+    });
+    if (customTexts.length === 0) {
       throw new AppError(400, "Message text is required", "VALIDATION");
     }
-    if (text.length > 4096) {
-      throw new AppError(400, "Message is too long (max 4096 characters)", "VALIDATION");
+
+    const workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { plan: true },
+    });
+    if (!workspace) {
+      throw new AppError(404, "Workspace not found", "NOT_FOUND");
     }
-    bodyText = text;
+    const maxContents = maxBulkMessageContentsForPlan(workspace.plan);
+    const aiCount =
+      payload.aiRewrite?.enabled === true ? payload.aiRewrite.count : 0;
+    if (customTexts.length + aiCount > maxContents) {
+      throw new AppError(
+        403,
+        `Your plan allows up to ${maxContents} message content(s) per bulk campaign (custom + AI). Upgrade billing to add more.`,
+        "PLAN_BULK_MESSAGE_CONTENT_LIMIT"
+      );
+    }
+
+    let pool = [...customTexts];
+    if (payload.aiRewrite?.enabled === true && aiCount > 0) {
+      const variants = await generateAiRewriteVariants(
+        workspaceId,
+        customTexts[0]!,
+        payload.aiRewrite
+      );
+      pool = [...customTexts, ...variants];
+    }
+
+    bodyTexts = pool;
+    bodyText = pool[0] ?? null;
     kind = OutboundKind.TEXT;
   } else {
     if (!payload.templateId) {
@@ -1445,6 +1512,9 @@ export async function createBulkCampaign(
       name: name.slice(0, 200),
       kind,
       bodyText,
+      ...(bodyTexts
+        ? { bodyTexts: bodyTexts as unknown as Prisma.InputJsonValue }
+        : {}),
       templateId,
       deviceIds: deviceIdsJson,
       selectionMode,
@@ -1514,6 +1584,7 @@ export async function createBulkCampaign(
           deviceMode: deviceModeEnum,
           kind,
           bodyText,
+          bodyTexts,
           templateId,
           attachmentType,
           attachmentAssetId,
@@ -1584,6 +1655,7 @@ type ExecuteCampaignArgs = {
   deviceMode: BulkDeviceMode;
   kind: OutboundKind;
   bodyText: string | null;
+  bodyTexts?: string[] | null;
   templateId: string | null;
   attachmentType: string | null;
   attachmentAssetId: string | null;
@@ -1674,6 +1746,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     deviceMode,
     kind,
     bodyText,
+    bodyTexts: bodyTextsArg,
     templateId,
     attachmentType,
     attachmentAssetId,
@@ -1682,6 +1755,10 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     maxRetries,
     antiBlock,
   } = args;
+  const messagePool =
+    kind === OutboundKind.TEXT
+      ? parseStoredBodyTexts(bodyTextsArg ?? null, bodyText)
+      : [];
   let dispatched = 0;
   let consecutiveFailures = 0;
   let stoppedByDailyCap = false;
@@ -1769,12 +1846,18 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       const rows: Prisma.OutboundMessageCreateManyInput[] = slice.map((recipient, j) => {
         const globalIdx = i + j;
         const devId = assignedDeviceForRecipient(globalIdx, deviceIds, deviceMode);
+        const simulatedText =
+          kind === OutboundKind.TEXT
+            ? antiBlock.enabled && antiBlock.spintaxEnabled
+              ? applySpintax(pickRandomBodyText(messagePool))
+              : pickRandomBodyText(messagePool)
+            : bodyText;
         return {
           workspaceId,
           deviceId: devId,
           toPhone: recipient.phone,
           kind,
-          bodyText,
+          bodyText: simulatedText,
           templateId,
           bulkCampaignId: campaignId,
           status: OutboundStatus.SIMULATED,
@@ -1838,8 +1921,8 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     const personalizedText =
       kind === OutboundKind.TEXT
         ? antiBlock.enabled && antiBlock.spintaxEnabled
-          ? applySpintax(bodyText ?? "")
-          : bodyText ?? ""
+          ? applySpintax(pickRandomBodyText(messagePool))
+          : pickRandomBodyText(messagePool)
         : null;
 
     const row = await prisma.outboundMessage.create({
@@ -2104,6 +2187,7 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
         deviceMode: campaign.deviceMode,
         kind: campaign.kind,
         bodyText: campaign.bodyText,
+        bodyTexts: parseStoredBodyTexts(campaign.bodyTexts, campaign.bodyText),
         templateId: campaign.templateId,
         attachmentType: campaign.attachmentType,
         attachmentAssetId: campaign.attachmentAssetId,

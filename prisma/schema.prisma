@@ -481,6 +481,11 @@ model BulkCampaign {
   name               String
   kind               OutboundKind
   bodyText           String?
+  /**
+   * Final message content pool for TEXT campaigns (custom + AI rewrites).
+   * bodyText is kept in sync with bodyTexts[0] for preview/compat.
+   */
+  bodyTexts          Json?
   templateId         String?
   template           MessageTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
   deviceIds          Json

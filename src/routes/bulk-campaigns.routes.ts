@@ -40,6 +40,7 @@ const createBody = z
     deviceIds: z.array(z.string().uuid()).min(1).max(20),
     kind: z.enum(["text", "template"]),
     bodyText: z.string().max(4096).optional(),
+    bodyTexts: z.array(z.string().min(1).max(4096)).min(1).max(20).optional(),
     templateId: z.string().uuid().optional(),
     selectionMode: z.enum(["groups", "all_verified", "manual"]),
     groupIds: z.array(z.string().uuid()).max(100).optional(),
@@ -55,6 +56,16 @@ const createBody = z
     delayMinSec: z.number().int().min(0).max(3600),
     delayMaxSec: z.number().int().min(0).max(3600),
     maxRetries: z.number().int().min(0).max(10),
+    aiRewrite: z
+      .object({
+        enabled: z.boolean(),
+        count: z.number().int().min(1).max(20).optional(),
+        credentialId: z.string().uuid().optional(),
+        systemPrompt: z.string().max(4000).optional(),
+        temperature: z.number().min(0).max(2).optional(),
+        maxTokens: z.number().int().min(1).max(4096).optional().nullable(),
+      })
+      .optional(),
     // Anti-block defaults ON server-side (15s+ delays, fail-stop, daily caps).
     // Pass antiBlock.enabled=false only if you intentionally disable filters.
     antiBlock: z
@@ -95,12 +106,41 @@ const createBody = z
       .optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.kind === "text" && !(data.bodyText?.trim().length)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Message text is required",
-        path: ["bodyText"],
-      });
+    if (data.kind === "text") {
+      const hasBodyText = Boolean(data.bodyText?.trim().length);
+      const hasBodyTexts = Boolean(
+        data.bodyTexts?.some((t) => t.trim().length > 0)
+      );
+      if (!hasBodyText && !hasBodyTexts) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Message text is required",
+          path: ["bodyTexts"],
+        });
+      }
+    }
+    if (data.aiRewrite?.enabled) {
+      if (!data.aiRewrite.credentialId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "credentialId is required when AI rewrite is enabled",
+          path: ["aiRewrite", "credentialId"],
+        });
+      }
+      if (data.aiRewrite.count == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "count is required when AI rewrite is enabled",
+          path: ["aiRewrite", "count"],
+        });
+      }
+      if (data.kind !== "text") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "AI rewrite is only supported for text campaigns",
+          path: ["aiRewrite"],
+        });
+      }
     }
     if (data.kind === "template" && !data.templateId) {
       ctx.addIssue({
@@ -340,6 +380,7 @@ router.post(
       deviceMode: body.deviceMode,
       kind: body.kind,
       bodyText: body.bodyText,
+      bodyTexts: body.bodyTexts,
       templateId: body.templateId,
       selectionMode: body.selectionMode,
       groupIds: body.groupIds,
@@ -351,6 +392,17 @@ router.post(
       delayMinSec: body.delayMinSec,
       delayMaxSec: body.delayMaxSec,
       maxRetries: body.maxRetries,
+      aiRewrite:
+        body.aiRewrite?.enabled === true
+          ? {
+              enabled: true as const,
+              count: body.aiRewrite.count!,
+              credentialId: body.aiRewrite.credentialId!,
+              systemPrompt: body.aiRewrite.systemPrompt,
+              temperature: body.aiRewrite.temperature,
+              maxTokens: body.aiRewrite.maxTokens,
+            }
+          : undefined,
       antiBlock: body.antiBlock,
     });
     res.status(201).json(out);
