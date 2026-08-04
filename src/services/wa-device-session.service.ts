@@ -341,10 +341,16 @@ const DEFAULT_RESOLVE_PER_DEVICE_MS = 18_000;
 /**
  * Finds a workspace device whose Baileys socket is actually open (not only CONNECTED in DB).
  * Tries DB-connected devices first, then any other device (e.g. creds on disk while status lags).
+ *
+ * Pass `onlyAlreadyOpen: true` to skip starting/waiting on sessions (instant null when none are hot).
  */
 export async function resolveOpenWaSocketForWorkspace(
   workspaceId: string,
-  options?: { maxDevices?: number; perDeviceTimeoutMs?: number }
+  options?: {
+    maxDevices?: number;
+    perDeviceTimeoutMs?: number;
+    onlyAlreadyOpen?: boolean;
+  }
 ): Promise<{ deviceId: string; sock: WASocket } | null> {
   if (!env.WHATSAPP_BRIDGE_ENABLED) {
     return null;
@@ -352,6 +358,7 @@ export async function resolveOpenWaSocketForWorkspace(
 
   const maxDevices = options?.maxDevices ?? DEFAULT_RESOLVE_MAX_DEVICES;
   const perMs = options?.perDeviceTimeoutMs ?? DEFAULT_RESOLVE_PER_DEVICE_MS;
+  const onlyAlreadyOpen = options?.onlyAlreadyOpen === true;
 
   const [connected, rest] = await Promise.all([
     prisma.device.findMany({
@@ -359,14 +366,16 @@ export async function resolveOpenWaSocketForWorkspace(
       orderBy: { updatedAt: "desc" },
       select: { id: true },
     }),
-    prisma.device.findMany({
-      where: {
-        workspaceId,
-        status: { not: DeviceStatus.CONNECTED },
-      },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    }),
+    onlyAlreadyOpen
+      ? Promise.resolve([] as Array<{ id: string }>)
+      : prisma.device.findMany({
+          where: {
+            workspaceId,
+            status: { not: DeviceStatus.CONNECTED },
+          },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        }),
   ]);
 
   const orderedIds = [...connected, ...rest]
@@ -378,6 +387,10 @@ export async function resolveOpenWaSocketForWorkspace(
     if (hot) {
       return { deviceId: id, sock: hot };
     }
+  }
+
+  if (onlyAlreadyOpen) {
+    return null;
   }
 
   for (const id of orderedIds) {

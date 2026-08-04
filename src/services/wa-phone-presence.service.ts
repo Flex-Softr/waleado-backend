@@ -10,7 +10,10 @@ function jidLeadingDigits(jid: string): string {
 
 /**
  * Uses Baileys `onWhatsApp` (WhatsApp USync) against a connected workspace device.
- * Returns null if the bridge is off, no connected device, or the socket/query fails.
+ * Returns null if the bridge is off, no active open session, or the socket/query fails.
+ *
+ * Does not start or wait on sessions — if nothing is already open, returns null immediately
+ * so contact revalidation can finish with formatting-only results.
  */
 export async function checkE164RegisteredOnWhatsApp(
   workspaceId: string,
@@ -21,7 +24,7 @@ export async function checkE164RegisteredOnWhatsApp(
   }
 
   const resolved = await resolveOpenWaSocketForWorkspace(workspaceId, {
-    perDeviceTimeoutMs: 22_000,
+    onlyAlreadyOpen: true,
     maxDevices: 8,
   });
   if (!resolved) {
