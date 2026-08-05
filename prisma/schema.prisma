@@ -218,6 +218,30 @@ model Workspace {
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
   aiCredentials          AiCredential[]
+  apiCredentials         ApiCredential[]
+}
+
+/**
+ * Workspace-scoped Open API credentials (client_id + client_secret).
+ * Raw secret is shown once at creation; only the hash is stored.
+ */
+model ApiCredential {
+  id                 String     @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name               String
+  clientId           String     @unique
+  clientSecretHash   String
+  clientSecretPrefix String
+  active             Boolean    @default(true)
+  lastUsedAt         DateTime?
+  revokedAt          DateTime?
+  createdByUserId    String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@index([workspaceId])
+  @@index([clientId])
 }
 
 /**
@@ -251,6 +275,8 @@ model Device {
   status                 DeviceStatus            @default(QR_READY)
   phone                  String?
   profilePictureUrl      String?
+  /** Workspace default device used by Open API single send when deviceId is omitted. */
+  isDefault              Boolean                 @default(false)
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   outboundMessages       OutboundMessage[]
@@ -261,6 +287,7 @@ model Device {
   liveChatThreads        LiveChatThread[]
 
   @@index([workspaceId])
+  @@index([workspaceId, isDefault])
 }
 
 model ChatbotFlow {

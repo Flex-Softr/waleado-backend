@@ -87,6 +87,22 @@ router.get(
 );
 
 router.post(
+  "/:deviceId/set-default",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const deviceId = req.params.deviceId;
+    if (!deviceId) {
+      throw new AppError(400, "deviceId required", "VALIDATION");
+    }
+    const device = await devices.setDefaultDevice(deviceId, auth.wid);
+    res.json(device);
+  })
+);
+
+router.post(
   "/:deviceId/disconnect",
   asyncHandler(async (req, res) => {
     const auth = req.auth;

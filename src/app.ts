@@ -24,6 +24,8 @@ import {
 import { healthRouter } from "./routes/health.routes";
 import { publicRouter } from "./routes/public.routes";
 import { authRouter } from "./routes/auth.routes";
+import { apiCredentialsRouter } from "./routes/api-credentials.routes";
+import { openApiRouter } from "./routes/open";
 import { stripeWebhookHandler } from "./routes/stripe-webhook";
 import {
   sslCommerzBrowserRouter,
@@ -51,7 +53,12 @@ app.use(
     origin: origins.length ? origins : true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Client-Id",
+      "X-Client-Secret",
+    ],
   })
 );
 
@@ -87,6 +94,8 @@ app.use("/v1", (_req, res, next) => {
 app.use(healthRouter);
 app.use("/v1/public", publicRouter);
 app.use("/v1/auth", authRouter);
+app.use("/v1/api-credentials", apiCredentialsRouter);
+app.use("/v1/open", openApiRouter);
 app.use("/v1/billing", billingRouter);
 app.use("/v1/devices", devicesRouter);
 app.use("/v1/templates", templatesRouter);

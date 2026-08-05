@@ -13,6 +13,7 @@ export type DeviceJson = {
   status: "qr_ready" | "connected";
   phone: string | null;
   profilePictureUrl: string | null;
+  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -56,6 +57,7 @@ export function deviceToJson(d: {
   status: DeviceStatus;
   phone: string | null;
   profilePictureUrl: string | null;
+  isDefault: boolean;
   createdAt: Date;
   updatedAt: Date;
 }): DeviceJson {
@@ -67,6 +69,7 @@ export function deviceToJson(d: {
     status: statusToApi(d.status),
     phone: d.phone,
     profilePictureUrl: d.profilePictureUrl,
+    isDefault: d.isDefault,
     createdAt: d.createdAt.toISOString(),
     updatedAt: d.updatedAt.toISOString(),
   };
@@ -160,6 +163,82 @@ export async function getDeviceOrThrow(deviceId: string, workspaceId: string) {
     throw new AppError(404, "Device not found", "NOT_FOUND");
   }
   return d;
+}
+
+/** Connected workspace device marked as default (for Open API sends). */
+export async function getDefaultDeviceOrThrow(workspaceId: string) {
+  const device = await prisma.device.findFirst({
+    where: {
+      workspaceId,
+      isDefault: true,
+      status: DeviceStatus.CONNECTED,
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (!device) {
+    throw new AppError(
+      400,
+      "No default device is set. Connect a WhatsApp device and mark it as default under Devices.",
+      "NO_DEFAULT_DEVICE"
+    );
+  }
+  return device;
+}
+
+/**
+ * Marks a connected device as the workspace default (clears any previous default).
+ */
+export async function setDefaultDevice(
+  deviceId: string,
+  workspaceId: string
+): Promise<DeviceJson> {
+  const device = await getDeviceOrThrow(deviceId, workspaceId);
+  if (device.status !== DeviceStatus.CONNECTED) {
+    throw new AppError(
+      400,
+      "Only a connected device can be set as the default.",
+      "DEVICE_NOT_CONNECTED"
+    );
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await tx.device.updateMany({
+      where: { workspaceId, isDefault: true, NOT: { id: deviceId } },
+      data: { isDefault: false },
+    });
+    return tx.device.update({
+      where: { id: deviceId },
+      data: { isDefault: true },
+    });
+  });
+
+  return deviceToJson(updated);
+}
+
+/**
+ * If the workspace has no default yet, promote this connected device.
+ * Safe to call from session connect handlers.
+ */
+export async function ensureDefaultDeviceIfNeeded(
+  deviceId: string,
+  workspaceId: string
+): Promise<void> {
+  const existing = await prisma.device.findFirst({
+    where: { workspaceId, isDefault: true },
+    select: { id: true },
+  });
+  if (existing) return;
+
+  const device = await prisma.device.findFirst({
+    where: { id: deviceId, workspaceId, status: DeviceStatus.CONNECTED },
+    select: { id: true },
+  });
+  if (!device) return;
+
+  await prisma.device.update({
+    where: { id: deviceId },
+    data: { isDefault: true },
+  });
 }
 
 const WA_PROFILE_UA =
@@ -314,6 +393,7 @@ export async function disconnectDevice(
       status: DeviceStatus.QR_READY,
       phone: null,
       profilePictureUrl: null,
+      isDefault: false,
     },
   });
   return deviceToJson(updated);
@@ -334,7 +414,11 @@ export async function simulateDeviceConnected(
       profilePictureUrl: null,
     },
   });
-  return deviceToJson(updated);
+  await ensureDefaultDeviceIfNeeded(deviceId, workspaceId);
+  const refreshed = await prisma.device.findFirstOrThrow({
+    where: { id: deviceId },
+  });
+  return deviceToJson(refreshed);
 }
 
 export async function deleteDevice(

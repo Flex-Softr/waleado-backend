@@ -5,6 +5,7 @@ import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import {
   validateAndFormatPhone,
+  validateAndFormatPhoneRequireCountryCode,
   validatePhoneForGrabberImport,
 } from "../lib/phone";
 import { checkE164RegisteredOnWhatsApp } from "./wa-phone-presence.service";
@@ -281,6 +282,131 @@ export async function createGroup(
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
     stats: { total: 0, verified: 0, unverified: 0, invalid: 0 },
+  };
+}
+
+export type CreateGroupWithPhonesResult = {
+  group: ContactGroupListItemJson;
+  created: ContactRowJson[];
+  skipped: { phone: string; reason: string }[];
+  whatsappChecked: boolean;
+};
+
+/**
+ * Open API: create a group and insert country-code-validated, de-duplicated phones.
+ * Optionally verifies WhatsApp registration when a connected session is available.
+ */
+export async function createGroupWithPhones(
+  workspaceId: string,
+  name: string,
+  phones: string[]
+): Promise<CreateGroupWithPhonesResult> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new AppError(400, "Group name is required", "VALIDATION");
+  }
+
+  const skipped: { phone: string; reason: string }[] = [];
+  const seen = new Set<string>();
+  const uniqueE164: string[] = [];
+
+  for (const raw of phones) {
+    const phoneRaw = typeof raw === "string" ? raw.trim() : "";
+    if (!phoneRaw) continue;
+
+    const v = validateAndFormatPhoneRequireCountryCode(phoneRaw);
+    if (!v.valid) {
+      skipped.push({ phone: phoneRaw, reason: v.message });
+      continue;
+    }
+    if (seen.has(v.e164)) {
+      skipped.push({ phone: phoneRaw, reason: "Duplicate number" });
+      continue;
+    }
+    seen.add(v.e164);
+    uniqueE164.push(v.e164);
+  }
+
+  if (phones.length > 0 && uniqueE164.length === 0) {
+    throw new AppError(
+      400,
+      "No valid unique phone numbers to add. Include a country code (with or without +).",
+      "INVALID_PHONE"
+    );
+  }
+
+  const created = await prisma.$transaction(
+    async (tx) => {
+      const g = await tx.contactGroup.create({
+        data: {
+          workspaceId,
+          name: trimmed.slice(0, 200),
+        },
+      });
+
+      if (uniqueE164.length === 0) {
+        return {
+          group: g,
+          contacts: [] as ContactRowJson[],
+        };
+      }
+
+      const rows: ContactRowJson[] = [];
+      for (let i = 0; i < uniqueE164.length; i += BULK_INSERT_CHUNK) {
+        const chunk = uniqueE164.slice(i, i + BULK_INSERT_CHUNK).map((e164) => ({
+          groupId: g.id,
+          name: "Contact",
+          phone: e164,
+          status: ContactStatus.UNVERIFIED,
+        }));
+        const inserted = await tx.contact.createManyAndReturn({ data: chunk });
+        for (const c of inserted) {
+          rows.push(contactToRow(c));
+        }
+      }
+
+      return { group: g, contacts: rows };
+    },
+    {
+      maxWait: 10_000,
+      timeout: 60_000,
+    }
+  );
+
+  let whatsappChecked = false;
+  let contacts = created.contacts;
+  if (contacts.length > 0) {
+    const revalidated = await revalidateContactsInGroup(
+      workspaceId,
+      created.group.id
+    );
+    whatsappChecked = revalidated.whatsappChecked;
+    if (whatsappChecked) {
+      const detail = await getGroupDetail(workspaceId, created.group.id);
+      contacts = detail.contacts;
+    }
+  }
+
+  const statsMap = await buildStatsMap(workspaceId);
+  const g = created.group;
+
+  return {
+    group: {
+      id: g.id,
+      name: g.name,
+      createdAt: g.createdAt.toISOString(),
+      updatedAt: g.updatedAt.toISOString(),
+      stats:
+        statsMap.get(g.id) ?? {
+          total: contacts.length,
+          verified: contacts.filter((c) => c.status === "verified").length,
+          unverified: contacts.filter((c) => c.status === "unverified").length,
+          invalid: contacts.filter((c) => c.status === "invalid").length,
+        },
+    },
+    created: contacts,
+    skipped,
+    whatsappChecked,
   };
 }
 

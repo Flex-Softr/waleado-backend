@@ -156,6 +156,52 @@ export function validateAndFormatPhone(raw: string): PhoneValidationResult {
   return last;
 }
 
+const COUNTRY_CODE_REQUIRED =
+  "Include a country code with or without + (e.g. +8801XXXXXXXXX or 8801XXXXXXXXX). Local numbers without a country code are not accepted.";
+
+/**
+ * Open API phone validation: country calling code is required (`+` optional).
+ * Does not use PHONE_DEFAULT_REGION for local/national numbers.
+ */
+export function validateAndFormatPhoneRequireCountryCode(
+  raw: string
+): PhoneValidationResult {
+  const trimmed = raw.normalize("NFC").trim();
+  if (!trimmed) {
+    return { valid: false, e164: null, message: "Enter a phone number" };
+  }
+  if (/@lid\b/i.test(trimmed)) {
+    return { valid: false, e164: null, message: LID_MESSAGE };
+  }
+  if (/@g\.us\b/i.test(trimmed)) {
+    return { valid: false, e164: null, message: GUS_MESSAGE };
+  }
+
+  const prepared = sanitizePhoneRawInput(trimmed);
+  if (!prepared) {
+    return { valid: false, e164: null, message: "Enter a phone number" };
+  }
+
+  const digits = digitsOnly(prepared);
+  if (digits.length < 8 || digits.length > 15) {
+    return { valid: false, e164: null, message: COUNTRY_CODE_REQUIRED };
+  }
+  if (digits.startsWith("0")) {
+    return { valid: false, e164: null, message: COUNTRY_CODE_REQUIRED };
+  }
+
+  // Parse as international only — never apply PHONE_DEFAULT_REGION.
+  let parsed = parsePhoneNumberFromString(prepared);
+  if (!parsed?.isValid()) {
+    parsed = parsePhoneNumberFromString(`+${digits}`);
+  }
+  if (!parsed?.isValid()) {
+    return { valid: false, e164: null, message: COUNTRY_CODE_REQUIRED };
+  }
+
+  return { valid: true, e164: parsed.format("E.164") };
+}
+
 /**
  * For **Group grabber → Contacts** import only: WhatsApp often exposes numbers that
  * `libphonenumber` (max metadata) rejects even though messaging works. We still try

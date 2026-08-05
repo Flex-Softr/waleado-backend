@@ -1,5 +1,10 @@
+import { AppError } from "../lib/errors";
 import { env } from "../env";
-import { resolveOpenWaSocketForWorkspace } from "./wa-device-session.service";
+import {
+  ensureWaDeviceSession,
+  resolveOpenWaSocketForWorkspace,
+  waitForOpenWaSocket,
+} from "./wa-device-session.service";
 
 const CHUNK = 80;
 
@@ -60,4 +65,52 @@ export async function checkE164RegisteredOnWhatsApp(
   }
 
   return out;
+}
+
+/**
+ * Verifies a single E.164 number is registered on WhatsApp via the given device session.
+ * Skips when the WhatsApp bridge is disabled (simulated-send mode).
+ */
+export async function assertE164RegisteredOnWhatsApp(
+  workspaceId: string,
+  e164: string,
+  deviceId: string
+): Promise<void> {
+  if (!env.WHATSAPP_BRIDGE_ENABLED) {
+    return;
+  }
+
+  await ensureWaDeviceSession(deviceId, workspaceId);
+  const sock = await waitForOpenWaSocket(deviceId, workspaceId);
+  if (!sock) {
+    throw new AppError(
+      503,
+      "WhatsApp session is offline or still connecting. Open Devices to restore the session, wait a few seconds, and try again.",
+      "WA_SESSION_OFFLINE"
+    );
+  }
+
+  let results: { jid: string; exists: boolean }[] | undefined;
+  try {
+    results = await sock.onWhatsApp(e164);
+  } catch (e) {
+    console.error("[wa-presence] onWhatsApp failed for open send", e);
+    throw new AppError(
+      502,
+      "Could not verify whether this number is on WhatsApp. Try again shortly.",
+      "WHATSAPP_LOOKUP_FAILED"
+    );
+  }
+
+  const digits = e164.replace(/\D/g, "");
+  const exists = (results ?? []).some(
+    (r) => r.exists && jidLeadingDigits(r.jid) === digits
+  );
+  if (!exists) {
+    throw new AppError(
+      400,
+      "This number is not registered on WhatsApp.",
+      "NOT_ON_WHATSAPP"
+    );
+  }
 }

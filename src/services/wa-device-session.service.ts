@@ -556,6 +556,12 @@ export async function ensureWaDeviceSession(
                 ...(phone ? { phone } : {}),
               },
             })
+            .then(async () => {
+              const { ensureDefaultDeviceIfNeeded } = await import(
+                "./devices.service"
+              );
+              await ensureDefaultDeviceIfNeeded(deviceId, workspaceId);
+            })
             .catch((err) => {
               console.error(
                 "[wa-session] failed to persist connected device",
@@ -600,6 +606,7 @@ export async function ensureWaDeviceSession(
                   status: DeviceStatus.QR_READY,
                   phone: null,
                   profilePictureUrl: null,
+                  isDefault: false,
                 },
               })
               .catch(() => {});
