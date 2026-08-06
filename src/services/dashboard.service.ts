@@ -24,7 +24,9 @@ export type DashboardOverviewKpi = {
     | "messages"
     | "delivery"
     | "sessions"
-    | "response";
+    | "response"
+    | "contacts"
+    | "campaigns";
 };
 
 export type DashboardBarPoint = { label: string; value: number };
@@ -103,10 +105,10 @@ export async function getDashboardOverview(
   const todayStart = startOfUtcDay(now);
   const d30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const d60 = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
-  const sixMonthsAgo = new Date(now);
-  sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 5);
-  sixMonthsAgo.setUTCDate(1);
-  sixMonthsAgo.setUTCHours(0, 0, 0, 0);
+  const twelveMonthsAgo = new Date(now);
+  twelveMonthsAgo.setUTCMonth(twelveMonthsAgo.getUTCMonth() - 11);
+  twelveMonthsAgo.setUTCDate(1);
+  twelveMonthsAgo.setUTCHours(0, 0, 0, 0);
 
   const lineFrom = new Date(now);
   lineFrom.setUTCDate(lineFrom.getUTCDate() - 13);
@@ -201,7 +203,7 @@ export async function getDashboardOverview(
 
   const [outboundForCharts, liveChatOutboundRows] = await Promise.all([
     prisma.outboundMessage.findMany({
-      where: { workspaceId, createdAt: { gte: sixMonthsAgo } },
+      where: { workspaceId, createdAt: { gte: twelveMonthsAgo } },
       select: {
         id: true,
         createdAt: true,
@@ -220,6 +222,7 @@ export async function getDashboardOverview(
         },
       },
       select: {
+        outboundMessageId: true,
         outboundMessage: { select: { createdAt: true } },
       },
     }),
@@ -246,13 +249,20 @@ export async function getDashboardOverview(
 
   let bulkScheduled = 0;
   let bulkCompleted = 0;
-  let bulkFailed = 0;
+  let bulkInProgress = 0;
+  let bulkCampaignsTotal = 0;
   for (const g of bulkTotals) {
+    bulkCampaignsTotal += g._count._all;
     if (g.status === "SCHEDULED") bulkScheduled = g._count._all;
     if (g.status === "COMPLETED") bulkCompleted = g._count._all;
-    if (g.status === "FAILED") bulkFailed = g._count._all;
+    if (
+      g.status === "PENDING" ||
+      g.status === "RUNNING" ||
+      g.status === "PAUSED"
+    ) {
+      bulkInProgress += g._count._all;
+    }
   }
-  const bulkCampaignsTotal = bulkScheduled + bulkCompleted + bulkFailed;
 
   let sentOk = 0;
   let sentFail = 0;
@@ -341,7 +351,7 @@ export async function getDashboardOverview(
       period: "Across all groups",
       changeLabel: "—",
       trend: "neutral",
-      iconKey: "response",
+      iconKey: "contacts",
     },
     {
       id: "campaigns",
@@ -350,7 +360,7 @@ export async function getDashboardOverview(
       period: "Created last 30 days",
       changeLabel: bulkTrend.label,
       trend: bulkTrend.trend,
-      iconKey: "revenue",
+      iconKey: "campaigns",
     },
   ];
 
@@ -363,7 +373,7 @@ export async function getDashboardOverview(
   }
 
   const barSeries: DashboardBarPoint[] = [];
-  for (let i = 5; i >= 0; i -= 1) {
+  for (let i = 11; i >= 0; i -= 1) {
     const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
     const y = t.getUTCFullYear();
     const m = t.getUTCMonth() + 1;
@@ -393,22 +403,25 @@ export async function getDashboardOverview(
     return b;
   }
 
+  const liveChatOutboundIds = new Set(
+    liveChatOutboundRows
+      .map((row) => row.outboundMessageId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+
   for (const o of outboundForCharts) {
     if (o.createdAt < lineFrom) continue;
     const b = bumpDay(o.createdAt);
-    if (o.bulkCampaignId) {
+    // Live-chat outbound rows also create OutboundMessage TEXT rows — count once as s4.
+    if (liveChatOutboundIds.has(o.id)) {
+      b.s4 += 1;
+    } else if (o.bulkCampaignId) {
       b.s1 += 1;
     } else if (o.kind === OutboundKind.TEXT) {
       b.s2 += 1;
     } else if (o.kind === OutboundKind.TEMPLATE) {
       b.s3 += 1;
     }
-  }
-
-  for (const row of liveChatOutboundRows) {
-    const ca = row.outboundMessage?.createdAt;
-    if (!ca || ca < lineFrom) continue;
-    bumpDay(ca).s4 += 1;
   }
 
   const lineSeries: DashboardLinePoint[] = [];
@@ -459,7 +472,10 @@ export async function getDashboardOverview(
       title: "Bulk sends",
       rows: [
         { label: "Campaigns", value: bulkCampaignsTotal },
-        { label: "Scheduled", value: bulkScheduled },
+        {
+          label: "In progress",
+          value: bulkInProgress + bulkScheduled,
+        },
       ],
       progress: bulkProgress,
       icon: "bulk",

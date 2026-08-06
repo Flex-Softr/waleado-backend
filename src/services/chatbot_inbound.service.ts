@@ -178,6 +178,16 @@ function firstTriggeredFlow(
   return null;
 }
 
+function inboundMessageKey(m: WAMessage): string | null {
+  const remote = m.key.remoteJid;
+  const id = m.key.id;
+  if (!remote || id == null || id === "") return null;
+  return `${remote}|${m.key.participant ?? ""}|${String(id)}`;
+}
+
+/**
+ * Returns message keys that received a chatbot reply so auto-reply can skip them.
+ */
 export async function dispatchChatbotFlowForInbound(
   deviceId: string,
   workspaceId: string,
@@ -187,8 +197,9 @@ export async function dispatchChatbotFlowForInbound(
     content: proto.IMessage | null | undefined
   ) => proto.IMessage | undefined,
   upsertType: MessageUpsertKind
-): Promise<void> {
-  if (messages.length === 0) return;
+): Promise<Set<string>> {
+  const handled = new Set<string>();
+  if (messages.length === 0) return handled;
 
   const flows = await prisma.chatbotFlow.findMany({
     where: { workspaceId, deviceId, active: true },
@@ -199,7 +210,7 @@ export async function dispatchChatbotFlowForInbound(
     },
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
   });
-  if (flows.length === 0) return;
+  if (flows.length === 0) return handled;
 
   const now = Date.now();
   for (const m of messages) {
@@ -207,6 +218,7 @@ export async function dispatchChatbotFlowForInbound(
     if (!shouldProcessUpsertType(m, upsertType)) continue;
     if (!claimMessage(m, now)) continue;
 
+    const msgKey = inboundMessageKey(m);
     const remoteJid = destinationJid(m);
     if (!remoteJid) continue;
     const inboundText = inboundTextFromMessage(m, extractMessageContent);
@@ -263,6 +275,7 @@ export async function dispatchChatbotFlowForInbound(
     }
     if (!sentAny) continue;
 
+    if (msgKey) handled.add(msgKey);
     if (flow.cooldownMinutes > 0) {
       cooldownUntilByKey.set(cooldownKey, now + flow.cooldownMinutes * 60_000);
     }
@@ -271,4 +284,5 @@ export async function dispatchChatbotFlowForInbound(
       data: { conversationCount: { increment: 1 } },
     });
   }
+  return handled;
 }

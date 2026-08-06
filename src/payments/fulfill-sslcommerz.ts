@@ -47,6 +47,12 @@ export async function fulfillSslCommerzByValId(input: {
     throw new AppError(400, "Amount mismatch", "AMOUNT_MISMATCH");
   }
 
+  const expectedCurrency = row.currency.trim().toUpperCase();
+  const gotCurrency = (validated.currency_type ?? "").trim().toUpperCase();
+  if (gotCurrency && gotCurrency !== expectedCurrency) {
+    throw new AppError(400, "Currency mismatch", "CURRENCY_MISMATCH");
+  }
+
   const plan = apiPaidPlanToDb(row.planId as Exclude<PlanIdApi, "free">);
   const periodEnd = new Date();
   periodEnd.setDate(periodEnd.getDate() + 30);

@@ -322,7 +322,9 @@ export async function dispatchAutoRepliesForInbound(
   extractMessageContent: (
     content: proto.IMessage | null | undefined
   ) => proto.IMessage | undefined,
-  upsertType: MessageUpsertKind
+  upsertType: MessageUpsertKind,
+  /** Message keys already answered by chatbot (or another inbound handler). */
+  skipMessageKeys?: Set<string>
 ): Promise<void> {
   if (!env.WHATSAPP_BRIDGE_ENABLED || messages.length === 0) {
     return;
@@ -345,6 +347,11 @@ export async function dispatchAutoRepliesForInbound(
   for (const m of messages) {
     if (!m.message || m.key.fromMe) continue;
     if (!shouldProcessUpsertType(m, upsertType)) continue;
+    const r = m.key.remoteJid;
+    const id = m.key.id;
+    if (r && id != null && id !== "" && skipMessageKeys?.has(`${r}|${m.key.participant ?? ""}|${String(id)}`)) {
+      continue;
+    }
     if (!claimMessageForAutoReply(m, now)) continue;
 
     const remoteJid = destinationJid(m);

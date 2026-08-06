@@ -59,11 +59,18 @@ const createBody = z
     aiRewrite: z
       .object({
         enabled: z.boolean(),
-        count: z.number().int().min(1).max(20).optional(),
+        count: z.coerce.number().int().min(1).max(20).optional(),
         credentialId: z.string().uuid().optional(),
+        model: z.string().min(1).max(200).optional(),
         systemPrompt: z.string().max(4000).optional(),
-        temperature: z.number().min(0).max(2).optional(),
-        maxTokens: z.number().int().min(1).max(4096).optional().nullable(),
+        temperature: z.coerce.number().min(0).max(2).optional(),
+        maxTokens: z.coerce
+          .number()
+          .int()
+          .min(1)
+          .max(4096)
+          .optional()
+          .nullable(),
       })
       .optional(),
     // Anti-block defaults ON server-side (15s+ delays, fail-stop, daily caps).
@@ -398,6 +405,7 @@ router.post(
               enabled: true as const,
               count: body.aiRewrite.count!,
               credentialId: body.aiRewrite.credentialId!,
+              model: body.aiRewrite.model,
               systemPrompt: body.aiRewrite.systemPrompt,
               temperature: body.aiRewrite.temperature,
               maxTokens: body.aiRewrite.maxTokens,

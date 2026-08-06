@@ -70,9 +70,30 @@ export async function generateOpenAiReply(
   }
 
   const data = (await res.json()) as {
-    choices?: { message?: { content?: unknown } }[];
+    choices?: {
+      message?: {
+        content?: unknown;
+        refusal?: unknown;
+      };
+      text?: unknown;
+    }[];
+    error?: { message?: unknown };
   };
-  const text = extractMessageContent(data.choices?.[0]?.message?.content);
+
+  if (data.error?.message) {
+    throw new Error(String(data.error.message).slice(0, 300));
+  }
+
+  const message = data.choices?.[0]?.message;
+  const refusal =
+    typeof message?.refusal === "string" ? message.refusal.trim() : "";
+  if (refusal) {
+    throw new Error(`Model refused: ${refusal.slice(0, 200)}`);
+  }
+
+  const text =
+    extractMessageContent(message?.content) ||
+    extractMessageContent(data.choices?.[0]?.text);
   if (!text) {
     throw new Error("OpenAI returned empty content");
   }
@@ -88,7 +109,12 @@ function extractMessageContent(content: unknown): string {
       .map((part) => {
         if (typeof part === "string") return part;
         if (part && typeof part === "object") {
-          const o = part as { text?: unknown; content?: unknown };
+          const o = part as {
+            type?: unknown;
+            text?: unknown;
+            content?: unknown;
+          };
+          // Gemini / OpenAI-compat multimodal parts: { type: "text", text: "..." }
           if (typeof o.text === "string") return o.text;
           if (typeof o.content === "string") return o.content;
         }

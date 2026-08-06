@@ -35,12 +35,16 @@ export function parseTriggerTokens(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** REGEX mode: one pattern per line. */
+const MAX_REGEX_PATTERNS = 10;
+const MAX_REGEX_PATTERN_LENGTH = 200;
+
+/** REGEX mode: one pattern per line (length/count capped to reduce ReDoS risk). */
 export function parseRegexPatterns(raw: string): string[] {
   return normalizeKeywordField(raw)
     .split(/\n+/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .filter((s) => s.length > 0 && s.length <= MAX_REGEX_PATTERN_LENGTH)
+    .slice(0, MAX_REGEX_PATTERNS);
 }
 
 function escapeRegExp(s: string): string {

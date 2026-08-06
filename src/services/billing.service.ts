@@ -18,7 +18,52 @@ function appPublicBase(): string {
   return env.APP_PUBLIC_URL.replace(/\/$/, "");
 }
 
+/**
+ * SSLCommerz is one-time / period-based (no recurring webhook). Downgrade when
+ * `currentPeriodEnd` has passed so paid features do not continue forever.
+ */
+export async function enforceSslCommerzPeriodExpiry(
+  workspaceId: string
+): Promise<boolean> {
+  const now = new Date();
+  const result = await prisma.workspace.updateMany({
+    where: {
+      id: workspaceId,
+      lastPaymentGateway: "sslcommerz",
+      plan: { not: Plan.FREE },
+      currentPeriodEnd: { lt: now },
+    },
+    data: {
+      plan: Plan.FREE,
+      subscriptionStatus: "expired",
+      currentPeriodEnd: null,
+      lastPaymentGateway: null,
+    },
+  });
+  return result.count > 0;
+}
+
+/** Global sweep for expired SSLCommerz periods (no per-workspace request needed). */
+export async function expireAllDueSslCommerzWorkspaces(): Promise<number> {
+  const now = new Date();
+  const result = await prisma.workspace.updateMany({
+    where: {
+      lastPaymentGateway: "sslcommerz",
+      plan: { not: Plan.FREE },
+      currentPeriodEnd: { lt: now },
+    },
+    data: {
+      plan: Plan.FREE,
+      subscriptionStatus: "expired",
+      currentPeriodEnd: null,
+      lastPaymentGateway: null,
+    },
+  });
+  return result.count;
+}
+
 export async function getBillingForWorkspace(workspaceId: string) {
+  await enforceSslCommerzPeriodExpiry(workspaceId);
   const ws = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: {

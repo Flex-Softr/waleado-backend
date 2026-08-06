@@ -43,11 +43,12 @@ import {
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
 import { maxBulkMessageContentsForPlan } from "../lib/plan-limits";
+import { enforceSslCommerzPeriodExpiry } from "./billing.service";
 import {
   generateAiRewriteVariants,
   normalizeBodyTexts,
   parseStoredBodyTexts,
-  pickRandomBodyText,
+  pickBodyTextForRecipient,
   type BulkAiRewriteInput,
 } from "./bulk_message_variants.service";
 
@@ -1441,6 +1442,7 @@ export async function createBulkCampaign(
       throw new AppError(400, "Message text is required", "VALIDATION");
     }
 
+    await enforceSslCommerzPeriodExpiry(workspaceId);
     const workspace = await prisma.workspace.findUnique({
       where: { id: workspaceId },
       select: { plan: true },
@@ -1449,9 +1451,25 @@ export async function createBulkCampaign(
       throw new AppError(404, "Workspace not found", "NOT_FOUND");
     }
     const maxContents = maxBulkMessageContentsForPlan(workspace.plan);
-    const aiCount =
-      payload.aiRewrite?.enabled === true ? payload.aiRewrite.count : 0;
-    if (customTexts.length + aiCount > maxContents) {
+    const aiEnabled = payload.aiRewrite?.enabled === true;
+    const aiCount = aiEnabled
+      ? Math.floor(Number(payload.aiRewrite?.count))
+      : 0;
+    if (aiEnabled && (!Number.isFinite(aiCount) || aiCount < 1)) {
+      throw new AppError(
+        400,
+        "AI rewrite count must be a positive integer when AI rewrite is enabled",
+        "VALIDATION"
+      );
+    }
+    if (aiEnabled && !payload.aiRewrite?.credentialId?.trim()) {
+      throw new AppError(
+        400,
+        "AI credentialId is required when AI rewrite is enabled",
+        "VALIDATION"
+      );
+    }
+    if (customTexts.length + Math.max(0, aiCount) > maxContents) {
       throw new AppError(
         403,
         `Your plan allows up to ${maxContents} message content(s) per bulk campaign (custom + AI). Upgrade billing to add more.`,
@@ -1460,12 +1478,27 @@ export async function createBulkCampaign(
     }
 
     let pool = [...customTexts];
-    if (payload.aiRewrite?.enabled === true && aiCount > 0) {
+    if (aiEnabled && aiCount > 0) {
       const variants = await generateAiRewriteVariants(
         workspaceId,
         customTexts[0]!,
-        payload.aiRewrite
+        {
+          enabled: true,
+          count: aiCount,
+          credentialId: payload.aiRewrite!.credentialId,
+          model: payload.aiRewrite!.model,
+          systemPrompt: payload.aiRewrite!.systemPrompt,
+          temperature: payload.aiRewrite!.temperature,
+          maxTokens: payload.aiRewrite!.maxTokens,
+        }
       );
+      if (variants.length < aiCount) {
+        throw new AppError(
+          502,
+          `AI rewrite returned ${variants.length} variant(s); expected ${aiCount}`,
+          "AI_REWRITE_INSUFFICIENT"
+        );
+      }
       pool = [...customTexts, ...variants];
     }
 
@@ -1512,9 +1545,10 @@ export async function createBulkCampaign(
       name: name.slice(0, 200),
       kind,
       bodyText,
-      ...(bodyTexts
-        ? { bodyTexts: bodyTexts as unknown as Prisma.InputJsonValue }
-        : {}),
+      bodyTexts:
+        bodyTexts && bodyTexts.length > 0
+          ? (bodyTexts as unknown as Prisma.InputJsonValue)
+          : undefined,
       templateId,
       deviceIds: deviceIdsJson,
       selectionMode,
@@ -1755,10 +1789,24 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     maxRetries,
     antiBlock,
   } = args;
-  const messagePool =
-    kind === OutboundKind.TEXT
-      ? parseStoredBodyTexts(bodyTextsArg ?? null, bodyText)
-      : [];
+  // Always resolve the pool from DB so we never drop custom variants if args were stale.
+  let messagePool: string[] = [];
+  if (kind === OutboundKind.TEXT) {
+    const stored = await prisma.bulkCampaign.findFirst({
+      where: { id: campaignId, workspaceId },
+      select: { bodyTexts: true, bodyText: true },
+    });
+    messagePool = parseStoredBodyTexts(
+      stored?.bodyTexts ?? bodyTextsArg ?? null,
+      stored?.bodyText ?? bodyText
+    );
+    if (messagePool.length === 0) {
+      messagePool = parseStoredBodyTexts(bodyTextsArg ?? null, bodyText);
+    }
+  }
+  /** Randomize which variant is used first, then rotate evenly across recipients. */
+  const variantRotationOffset =
+    messagePool.length > 1 ? Math.floor(Math.random() * messagePool.length) : 0;
   let dispatched = 0;
   let consecutiveFailures = 0;
   let stoppedByDailyCap = false;
@@ -1787,24 +1835,25 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     return Boolean(row);
   }
 
+  /**
+   * Returns false when the campaign was deleted or paused so the global scheduled
+   * worker is never blocked waiting on a single paused campaign.
+   * Resume sets status back to PENDING/SCHEDULED for the next worker tick.
+   */
   async function waitWhilePaused(): Promise<boolean> {
-    for (;;) {
-      const row = await prisma.bulkCampaign.findFirst({
-        where: { id: campaignId, workspaceId },
-        select: { status: true },
+    const row = await prisma.bulkCampaign.findFirst({
+      where: { id: campaignId, workspaceId },
+      select: { status: true },
+    });
+    if (!row) return false;
+    if (row.status === BulkCampaignStatus.PAUSED) return false;
+    if (row.status === BulkCampaignStatus.PENDING) {
+      await prisma.bulkCampaign.updateMany({
+        where: { id: campaignId, workspaceId, status: BulkCampaignStatus.PENDING },
+        data: { status: BulkCampaignStatus.RUNNING },
       });
-      if (!row) return false;
-      if (row.status !== BulkCampaignStatus.PAUSED) {
-        if (row.status === BulkCampaignStatus.PENDING) {
-          await prisma.bulkCampaign.updateMany({
-            where: { id: campaignId, workspaceId, status: BulkCampaignStatus.PENDING },
-            data: { status: BulkCampaignStatus.RUNNING },
-          });
-        }
-        return true;
-      }
-      await sleepMs(3_000);
     }
+    return true;
   }
 
   async function waitUntilSendAllowed(): Promise<boolean> {
@@ -1846,11 +1895,19 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       const rows: Prisma.OutboundMessageCreateManyInput[] = slice.map((recipient, j) => {
         const globalIdx = i + j;
         const devId = assignedDeviceForRecipient(globalIdx, deviceIds, deviceMode);
+        const picked =
+          kind === OutboundKind.TEXT
+            ? pickBodyTextForRecipient(
+                messagePool,
+                globalIdx,
+                variantRotationOffset
+              )
+            : "";
         const simulatedText =
           kind === OutboundKind.TEXT
             ? antiBlock.enabled && antiBlock.spintaxEnabled
-              ? applySpintax(pickRandomBodyText(messagePool))
-              : pickRandomBodyText(messagePool)
+              ? applySpintax(picked)
+              : picked
             : bodyText;
         return {
           workspaceId,
@@ -1918,11 +1975,15 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       continue;
     }
 
+    const pickedText =
+      kind === OutboundKind.TEXT
+        ? pickBodyTextForRecipient(messagePool, i, variantRotationOffset)
+        : "";
     const personalizedText =
       kind === OutboundKind.TEXT
         ? antiBlock.enabled && antiBlock.spintaxEnabled
-          ? applySpintax(pickRandomBodyText(messagePool))
-          : pickRandomBodyText(messagePool)
+          ? applySpintax(pickedText)
+          : pickedText
         : null;
 
     const row = await prisma.outboundMessage.create({

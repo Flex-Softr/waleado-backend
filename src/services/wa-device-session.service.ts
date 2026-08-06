@@ -651,20 +651,10 @@ export async function ensureWaDeviceSession(
         } catch (err) {
           console.error("[wa-session] live-chat ingest error", err);
         }
+        // Chatbot takes priority; auto-reply skips messages the chatbot already answered.
+        let chatbotHandled = new Set<string>();
         try {
-          await dispatchAutoRepliesForInbound(
-            deviceId,
-            workspaceId,
-            sock,
-            messages,
-            extractMessageContent,
-            type
-          );
-        } catch (err) {
-          console.error("[wa-session] auto-reply handler error", err);
-        }
-        try {
-          await dispatchChatbotFlowForInbound(
+          chatbotHandled = await dispatchChatbotFlowForInbound(
             deviceId,
             workspaceId,
             sock,
@@ -674,6 +664,19 @@ export async function ensureWaDeviceSession(
           );
         } catch (err) {
           console.error("[wa-session] chatbot handler error", err);
+        }
+        try {
+          await dispatchAutoRepliesForInbound(
+            deviceId,
+            workspaceId,
+            sock,
+            messages,
+            extractMessageContent,
+            type,
+            chatbotHandled
+          );
+        } catch (err) {
+          console.error("[wa-session] auto-reply handler error", err);
         }
       });
 

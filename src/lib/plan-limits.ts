@@ -4,12 +4,13 @@ import { Plan } from "@prisma/client";
 export function maxBulkMessageContentsForPlan(plan: Plan): number {
   switch (plan) {
     case Plan.FREE:
-      return 1;
+      // Allow 1 custom seed + 1 AI rewrite so AI variants are usable on free.
+      return 2;
     case Plan.PRO:
       return 5;
     case Plan.BUSINESS:
       return 20;
     default:
-      return 1;
+      return 2;
   }
 }

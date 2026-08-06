@@ -207,7 +207,8 @@ export async function requestPasswordReset(input: {
 
   return {
     ok: true,
-    ...(mail.delivered ? {} : { resetUrl }),
+    // Never expose reset tokens outside local development.
+    ...(env.NODE_ENV === "development" && !mail.delivered ? { resetUrl } : {}),
     emailDelivered: mail.delivered,
   };
 }

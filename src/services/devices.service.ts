@@ -3,6 +3,7 @@ import { DeviceStatus, Plan } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { env } from "../env";
+import { enforceSslCommerzPeriodExpiry } from "./billing.service";
 import * as waSession from "./wa-device-session.service";
 
 export type DeviceJson = {
@@ -125,6 +126,7 @@ export async function createDevice(
     throw new AppError(400, "Device name is required", "VALIDATION");
   }
 
+  await enforceSslCommerzPeriodExpiry(workspaceId);
   const workspace = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: { plan: true },
@@ -404,6 +406,13 @@ export async function simulateDeviceConnected(
   deviceId: string,
   workspaceId: string
 ): Promise<DeviceJson> {
+  if (env.NODE_ENV === "production") {
+    throw new AppError(
+      403,
+      "Simulate connect is disabled in production",
+      "SIMULATE_CONNECT_DISABLED"
+    );
+  }
   await getDeviceOrThrow(deviceId, workspaceId);
   await waSession.stopWaDeviceSession(deviceId, workspaceId);
   const updated = await prisma.device.update({

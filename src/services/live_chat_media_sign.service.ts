@@ -32,5 +32,9 @@ export function verifyLiveChatMediaToken(input: {
   }
   const payload = `${input.workspaceId}:${input.assetId}:${input.exp}`;
   const expected = signRaw(payload);
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(input.sig));
+  const expectedBuf = Buffer.from(expected);
+  const sigBuf = Buffer.from(input.sig);
+  // timingSafeEqual throws when lengths differ — treat as invalid signature.
+  if (expectedBuf.length !== sigBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, sigBuf);
 }

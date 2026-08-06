@@ -1,4 +1,5 @@
 import { AppError } from "../lib/errors";
+import { env } from "../env";
 import { getStripe } from "../lib/stripe-client";
 import type { PlanIdApi } from "../lib/plan-mapping";
 import { applyDemoPlan } from "../services/billing.service";
@@ -30,6 +31,13 @@ export async function initiatePaidCheckout(
 
   if (gateway === "stripe") {
     if (!getStripe()) {
+      if (env.NODE_ENV === "production") {
+        throw new AppError(
+          503,
+          "Stripe is not configured (set STRIPE_SECRET_KEY)",
+          "STRIPE_NOT_CONFIGURED"
+        );
+      }
       const planId = await applyDemoPlan(input.workspaceId, input.planId);
       return { kind: "demo", planId: planId as PlanIdApi };
     }

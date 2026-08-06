@@ -48,8 +48,12 @@ app.use(
 );
 
 const origins = env.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean);
+if (!origins.length && env.NODE_ENV === "production") {
+  throw new Error("CORS_ORIGIN must be set to at least one origin in production");
+}
 app.use(
   cors({
+    // Reflect-any with credentials is unsafe; only allow in non-production when unset.
     origin: origins.length ? origins : true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
