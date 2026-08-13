@@ -8,7 +8,7 @@
  */
 import path from "path";
 import { config } from "dotenv";
-import { PrismaClient, MembershipRole } from "@prisma/client";
+import { PrismaClient, MembershipRole, UserRole } from "@prisma/client";
 
 import { hashPassword } from "../src/lib/password";
 import { normalizeDatabaseUrl } from "../src/lib/normalize-database-url";
@@ -37,22 +37,26 @@ export const SEED_USER_PASSWORD = "SeedPass12345";
 const SEED_USERS: {
   email: string;
   name: string;
-  role: MembershipRole;
+  membershipRole: MembershipRole;
+  userRole: UserRole;
 }[] = [
   {
     email: "owner@seed.flexowhats.local",
     name: "Seed Owner",
-    role: "OWNER",
+    membershipRole: "OWNER",
+    userRole: "CUSTOMER",
   },
   {
     email: "admin@seed.flexowhats.local",
     name: "Seed Admin",
-    role: "OWNER",
+    membershipRole: "OWNER",
+    userRole: "ADMIN",
   },
   {
     email: "member@seed.flexowhats.local",
     name: "Seed Member",
-    role: "OWNER",
+    membershipRole: "OWNER",
+    userRole: "CUSTOMER",
   },
 ];
 
@@ -106,10 +110,12 @@ async function main() {
         email,
         name: row.name,
         passwordHash,
+        role: row.userRole,
       },
       update: {
         name: row.name,
         passwordHash,
+        role: row.userRole,
       },
     });
 
@@ -123,14 +129,16 @@ async function main() {
       create: {
         userId: user.id,
         workspaceId: workspace.id,
-        role: row.role,
+        role: row.membershipRole,
       },
       update: {
-        role: row.role,
+        role: row.membershipRole,
       },
     });
 
-    console.log(`  ${row.role.padEnd(6)} ${email} → workspace ${workspace.slug}`);
+    console.log(
+      `  user=${row.userRole.padEnd(8)} membership=${row.membershipRole.padEnd(6)} ${email} → workspace ${workspace.slug}`
+    );
   }
 
   console.log("\nPassword for all seed users:", SEED_USER_PASSWORD);

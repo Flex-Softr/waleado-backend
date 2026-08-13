@@ -52,9 +52,20 @@ function toSafeUser(user: User): SafeUser {
   return { id: user.id, email: user.email, name: user.name, role: user.role };
 }
 
+function assertUserNotBlocked(user: User): void {
+  if (user.blockedAt) {
+    throw new AppError(
+      403,
+      "This account has been blocked. Contact support.",
+      "ACCOUNT_BLOCKED"
+    );
+  }
+}
+
 async function issueSession(
   user: User
 ): Promise<{ response: AuthResponse; rawRefresh: string }> {
+  assertUserNotBlocked(user);
   const primary = await pickPrimaryMembership(user.id);
   if (!primary) {
     throw new AppError(500, "User has no workspace", "NO_WORKSPACE");
