@@ -6,7 +6,10 @@ export type AccessPayload = {
   sub: string;
   email: string;
   wid: string;
+  /** Workspace MembershipRole (OWNER | ADMIN | MEMBER). */
   role: string;
+  /** Platform UserRole (ADMIN | CUSTOMER). */
+  userRole: string;
   jti: string;
 };
 
@@ -17,6 +20,7 @@ export function signAccessToken(payload: Omit<AccessPayload, "jti"> & { jti?: st
     email: payload.email,
     wid: payload.wid,
     role: payload.role,
+    userRole: payload.userRole,
     jti,
   };
   const options: SignOptions = {

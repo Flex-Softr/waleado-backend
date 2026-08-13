@@ -1,4 +1,4 @@
-import type { MembershipRole, User } from "@prisma/client";
+import type { MembershipRole, User, UserRole } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import {
   generatePasswordResetToken,
@@ -17,6 +17,7 @@ export type SafeUser = {
   id: string;
   email: string;
   name: string | null;
+  role: UserRole;
 };
 
 export type WorkspaceSummary = {
@@ -48,7 +49,7 @@ async function pickPrimaryMembership(userId: string) {
 }
 
 function toSafeUser(user: User): SafeUser {
-  return { id: user.id, email: user.email, name: user.name };
+  return { id: user.id, email: user.email, name: user.name, role: user.role };
 }
 
 async function issueSession(
@@ -64,6 +65,7 @@ async function issueSession(
     email: user.email,
     wid: primary.workspace.id,
     role: primary.role,
+    userRole: user.role,
   });
 
   const rawRefresh = generateRefreshToken();
