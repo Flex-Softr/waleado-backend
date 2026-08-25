@@ -50,7 +50,7 @@ router.post(
     const body = checkoutBody.parse(req.body);
     const user = await prisma.user.findUnique({
       where: { id: auth.sub },
-      select: { email: true, name: true },
+      select: { email: true, name: true, phone: true },
     });
     if (!user) {
       throw new AppError(404, "User not found", "NOT_FOUND");
@@ -58,6 +58,7 @@ router.post(
     const gateway = body.gateway as PaymentGatewayId;
     const customerPhone =
       body.customerPhone?.trim() ||
+      user.phone ||
       (gateway === "sslcommerz" ? "01700000000" : "0000000000");
     const result = await initiatePaidCheckout(gateway, {
       workspaceId: auth.wid,

@@ -52,11 +52,46 @@ router.post(
         email: z.string().email().max(320),
         password: z.string().min(10).max(200),
         name: z.string().trim().min(1).max(120).optional(),
+        phone: z.string().trim().max(30).optional().nullable(),
+        phoneNumber: z.string().trim().max(30).optional().nullable(),
         role: z.enum(["ADMIN", "CUSTOMER"]).default("CUSTOMER"),
       })
       .parse(req.body);
-    const user = await admin.createAdminUser(body);
+    const phoneInput = body.phone !== undefined ? body.phone : body.phoneNumber;
+    const user = await admin.createAdminUser({
+      email: body.email,
+      password: body.password,
+      name: body.name,
+      phone: phoneInput,
+      role: body.role,
+    });
     res.status(201).json({ user });
+  })
+);
+
+router.patch(
+  "/users/:id",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const body = z
+      .object({
+        name: z.string().trim().min(1).max(120).optional().nullable(),
+        phone: z.string().trim().max(30).optional().nullable(),
+        phoneNumber: z.string().trim().max(30).optional().nullable(),
+        role: z.enum(["ADMIN", "CUSTOMER"]).optional(),
+      })
+      .parse(req.body);
+    const phoneInput = body.phone !== undefined ? body.phone : body.phoneNumber;
+    const user = await admin.updateAdminUser({
+      actorUserId: auth.sub,
+      targetUserId: id,
+      name: body.name,
+      phone: phoneInput,
+      role: body.role,
+    });
+    res.json({ user });
   })
 );
 

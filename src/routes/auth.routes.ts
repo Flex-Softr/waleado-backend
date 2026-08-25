@@ -11,6 +11,8 @@ import {
   requestPasswordReset,
   resetPassword,
   getMeForUser,
+  updateMeForUser,
+  changePasswordForUser,
   signInOrRegisterGoogleUser,
 } from "../services/auth.service";
 import {
@@ -55,6 +57,8 @@ const registerSchema = z.object({
     .min(10, "Password must be at least 10 characters")
     .max(128),
   name: z.string().trim().max(120).optional(),
+  phone: z.string().trim().max(30).optional().nullable(),
+  phoneNumber: z.string().trim().max(30).optional().nullable(),
 });
 
 const loginSchema = z.object({
@@ -69,6 +73,20 @@ const forgotPasswordSchema = z.object({
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(256),
   password: z
+    .string()
+    .min(10, "Password must be at least 10 characters")
+    .max(128),
+});
+
+const updateMeSchema = z.object({
+  name: z.string().trim().max(120).optional().nullable(),
+  phone: z.string().trim().max(30).optional().nullable(),
+  phoneNumber: z.string().trim().max(30).optional().nullable(),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().max(128).optional(),
+  newPassword: z
     .string()
     .min(10, "Password must be at least 10 characters")
     .max(128),
@@ -91,7 +109,13 @@ router.post(
     if (prior) {
       await logoutSession(prior);
     }
-    const { rawRefresh, ...payload } = await registerUser(body);
+    const phoneInput = body.phone !== undefined ? body.phone : body.phoneNumber;
+    const { rawRefresh, ...payload } = await registerUser({
+      email: body.email,
+      password: body.password,
+      name: body.name,
+      phone: phoneInput,
+    });
     setRefreshCookie(res, rawRefresh);
     res.status(201).json(payload);
   })
@@ -273,4 +297,38 @@ router.get(
   })
 );
 
+router.patch(
+  "/me",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const body = updateMeSchema.parse(req.body);
+    const phoneInput = body.phone !== undefined ? body.phone : body.phoneNumber;
+    const me = await updateMeForUser(auth.sub, auth.wid, {
+      name: body.name,
+      phone: phoneInput,
+    });
+    res.json(me);
+  })
+);
+
+router.post(
+  "/change-password",
+  requireAuth,
+  strictAuthLimiter,
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const body = changePasswordSchema.parse(req.body);
+    const result = await changePasswordForUser(auth.sub, body);
+    res.json(result);
+  })
+);
+
 export { router as authRouter };
+

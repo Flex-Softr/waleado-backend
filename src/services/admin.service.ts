@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { hashPassword } from "../lib/password";
+import { validateAndFormatPhone } from "../lib/phone";
 import { planToApi, apiPaidPlanToDb, type PlanIdApi } from "../lib/plan-mapping";
 import { fulfillSslCommerzByValId } from "../payments/fulfill-sslcommerz";
 
@@ -78,6 +79,7 @@ export async function listAdminUsers(input: {
         OR: [
           { email: { contains: q, mode: "insensitive" } },
           { name: { contains: q, mode: "insensitive" } },
+          { phone: { contains: q, mode: "insensitive" } },
         ],
       }
     : {};
@@ -93,6 +95,7 @@ export async function listAdminUsers(input: {
         id: true,
         email: true,
         name: true,
+        phone: true,
         role: true,
         blockedAt: true,
         createdAt: true,
@@ -123,6 +126,7 @@ export async function listAdminUsers(input: {
       id: u.id,
       email: u.email,
       name: u.name,
+      phone: u.phone ?? null,
       role: u.role,
       blockedAt: u.blockedAt?.toISOString() ?? null,
       createdAt: u.createdAt.toISOString(),
@@ -164,6 +168,7 @@ export async function setUserBlocked(input: {
       id: true,
       email: true,
       name: true,
+      phone: true,
       role: true,
       blockedAt: true,
       createdAt: true,
@@ -181,6 +186,7 @@ export async function setUserBlocked(input: {
     id: updated.id,
     email: updated.email,
     name: updated.name,
+    phone: updated.phone ?? null,
     role: updated.role,
     blockedAt: updated.blockedAt?.toISOString() ?? null,
     createdAt: updated.createdAt.toISOString(),
@@ -191,6 +197,7 @@ function mapUserRow(u: {
   id: string;
   email: string;
   name: string | null;
+  phone?: string | null;
   role: "ADMIN" | "CUSTOMER";
   blockedAt: Date | null;
   createdAt: Date;
@@ -208,6 +215,7 @@ function mapUserRow(u: {
     id: u.id,
     email: u.email,
     name: u.name,
+    phone: u.phone ?? null,
     role: u.role,
     blockedAt: u.blockedAt?.toISOString() ?? null,
     createdAt: u.createdAt.toISOString(),
@@ -225,12 +233,22 @@ export async function createAdminUser(input: {
   email: string;
   password: string;
   name?: string;
+  phone?: string | null;
   role: "ADMIN" | "CUSTOMER";
 }) {
   const email = input.email.toLowerCase().trim();
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
     throw new AppError(409, "Email already registered", "EMAIL_TAKEN");
+  }
+
+  let formattedPhone: string | null = null;
+  if (input.phone && input.phone.trim()) {
+    const v = validateAndFormatPhone(input.phone);
+    if (!v.valid) {
+      throw new AppError(400, v.message, "INVALID_PHONE");
+    }
+    formattedPhone = v.e164;
   }
 
   const passwordHash = await hashPassword(input.password);
@@ -245,6 +263,7 @@ export async function createAdminUser(input: {
         email,
         passwordHash,
         name: input.name?.trim() || null,
+        phone: formattedPhone,
         role: input.role,
       },
     });
@@ -270,6 +289,7 @@ export async function createAdminUser(input: {
       id: true,
       email: true,
       name: true,
+      phone: true,
       role: true,
       blockedAt: true,
       createdAt: true,
@@ -287,6 +307,119 @@ export async function createAdminUser(input: {
   });
 
   return mapUserRow(full);
+}
+
+export async function updateAdminUser(input: {
+  actorUserId: string;
+  targetUserId: string;
+  name?: string | null;
+  phone?: string | null;
+  role?: "ADMIN" | "CUSTOMER";
+}) {
+  const target = await prisma.user.findUnique({
+    where: { id: input.targetUserId },
+    select: { id: true, role: true, email: true },
+  });
+  if (!target) {
+    throw new AppError(404, "User not found", "NOT_FOUND");
+  }
+
+  if (input.role && input.role !== target.role) {
+    if (input.actorUserId === input.targetUserId) {
+      throw new AppError(
+        400,
+        "You cannot change your own platform role",
+        "CANNOT_CHANGE_OWN_ROLE"
+      );
+    }
+    if (target.role === "ADMIN" && input.role === "CUSTOMER") {
+      const otherAdmins = await prisma.user.count({
+        where: { role: "ADMIN", id: { not: target.id } },
+      });
+      if (otherAdmins === 0) {
+        throw new AppError(
+          400,
+          "Cannot remove the last platform admin",
+          "LAST_ADMIN"
+        );
+      }
+    }
+  }
+
+  const updateData: Prisma.UserUpdateInput = {};
+  if (input.name !== undefined) {
+    updateData.name = input.name ? input.name.trim() : null;
+  }
+  if (input.phone !== undefined) {
+    if (input.phone && input.phone.trim()) {
+      const v = validateAndFormatPhone(input.phone);
+      if (!v.valid) {
+        throw new AppError(400, v.message, "INVALID_PHONE");
+      }
+      updateData.phone = v.e164;
+    } else {
+      updateData.phone = null;
+    }
+  }
+  if (input.role !== undefined) {
+    updateData.role = input.role;
+  }
+
+  const updated = Object.keys(updateData).length > 0
+    ? await prisma.user.update({
+        where: { id: target.id },
+        data: updateData,
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          phone: true,
+          role: true,
+          blockedAt: true,
+          createdAt: true,
+          memberships: {
+            select: {
+              role: true,
+              workspace: {
+                select: { id: true, name: true, slug: true, plan: true },
+              },
+            },
+            orderBy: { createdAt: "asc" },
+            take: 5,
+          },
+        },
+      })
+    : await prisma.user.findUniqueOrThrow({
+        where: { id: target.id },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+          phone: true,
+          role: true,
+          blockedAt: true,
+          createdAt: true,
+          memberships: {
+            select: {
+              role: true,
+              workspace: {
+                select: { id: true, name: true, slug: true, plan: true },
+              },
+            },
+            orderBy: { createdAt: "asc" },
+            take: 5,
+          },
+        },
+      });
+
+  if (input.role !== undefined && input.role !== target.role) {
+    await prisma.refreshToken.updateMany({
+      where: { userId: target.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
+  return mapUserRow(updated);
 }
 
 export async function setUserPlatformRole(input: {
@@ -316,6 +449,7 @@ export async function setUserPlatformRole(input: {
         id: true,
         email: true,
         name: true,
+        phone: true,
         role: true,
         blockedAt: true,
         createdAt: true,
@@ -354,6 +488,7 @@ export async function setUserPlatformRole(input: {
       id: true,
       email: true,
       name: true,
+      phone: true,
       role: true,
       blockedAt: true,
       createdAt: true,
@@ -459,6 +594,7 @@ export async function listAdminSubscriptions(input: {
               OR: [
                 { email: { contains: q, mode: "insensitive" } },
                 { name: { contains: q, mode: "insensitive" } },
+                { phone: { contains: q, mode: "insensitive" } },
               ],
             },
           },
@@ -491,7 +627,7 @@ export async function listAdminSubscriptions(input: {
           take: 1,
           select: {
             user: {
-              select: { id: true, email: true, name: true },
+              select: { id: true, email: true, name: true, phone: true },
             },
           },
         },
@@ -518,7 +654,7 @@ export async function listAdminSubscriptions(input: {
         createdAt: ws.createdAt.toISOString(),
         updatedAt: ws.updatedAt.toISOString(),
         owner: owner
-          ? { id: owner.id, email: owner.email, name: owner.name }
+          ? { id: owner.id, email: owner.email, name: owner.name, phone: owner.phone ?? null }
           : null,
       };
     }),
@@ -601,7 +737,7 @@ export async function updateAdminSubscription(input: {
         where: { role: "OWNER" },
         take: 1,
         select: {
-          user: { select: { id: true, email: true, name: true } },
+          user: { select: { id: true, email: true, name: true, phone: true } },
         },
       },
     },
@@ -621,7 +757,7 @@ export async function updateAdminSubscription(input: {
     createdAt: updated.createdAt.toISOString(),
     updatedAt: updated.updatedAt.toISOString(),
     owner: owner
-      ? { id: owner.id, email: owner.email, name: owner.name }
+      ? { id: owner.id, email: owner.email, name: owner.name, phone: owner.phone ?? null }
       : null,
   };
 }

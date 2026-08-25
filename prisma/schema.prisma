@@ -166,6 +166,7 @@ model User {
    */
   googleId            String?              @unique
   name                String?
+  phone               String?
   /**
    * Platform role — not workspace membership.
    */

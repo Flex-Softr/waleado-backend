@@ -9,6 +9,7 @@ import {
 import { hashPassword, verifyPassword } from "../lib/password";
 import { signAccessToken } from "../lib/jwt";
 import { AppError } from "../lib/errors";
+import { validateAndFormatPhone } from "../lib/phone";
 import { env } from "../env";
 import { randomUUID } from "crypto";
 import { sendPasswordResetEmail } from "./mail.service";
@@ -17,7 +18,9 @@ export type SafeUser = {
   id: string;
   email: string;
   name: string | null;
+  phone: string | null;
   role: UserRole;
+  hasPassword?: boolean;
 };
 
 export type WorkspaceSummary = {
@@ -49,7 +52,14 @@ async function pickPrimaryMembership(userId: string) {
 }
 
 function toSafeUser(user: User): SafeUser {
-  return { id: user.id, email: user.email, name: user.name, role: user.role };
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    phone: user.phone ?? null,
+    role: user.role,
+    hasPassword: Boolean(user.passwordHash),
+  };
 }
 
 function assertUserNotBlocked(user: User): void {
@@ -112,11 +122,21 @@ export async function registerUser(input: {
   email: string;
   password: string;
   name?: string;
+  phone?: string | null;
 }): Promise<AuthResponse & { rawRefresh: string }> {
   const email = input.email.toLowerCase().trim();
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) {
     throw new AppError(409, "Email already registered", "EMAIL_TAKEN");
+  }
+
+  let formattedPhone: string | null = null;
+  if (input.phone && input.phone.trim()) {
+    const v = validateAndFormatPhone(input.phone);
+    if (!v.valid) {
+      throw new AppError(400, v.message, "INVALID_PHONE");
+    }
+    formattedPhone = v.e164;
   }
 
   const passwordHash = await hashPassword(input.password);
@@ -131,6 +151,7 @@ export async function registerUser(input: {
         email,
         passwordHash,
         name: input.name?.trim() || null,
+        phone: formattedPhone,
       },
     });
     const ws = await tx.workspace.create({
@@ -415,3 +436,103 @@ export async function getMeForUser(userId: string, workspaceId: string) {
     },
   };
 }
+
+export async function updateMeForUser(
+  userId: string,
+  workspaceId: string,
+  input: {
+    name?: string | null;
+    phone?: string | null;
+  }
+) {
+  const membership = await prisma.membership.findUnique({
+    where: {
+      userId_workspaceId: { userId, workspaceId },
+    },
+    include: { user: true, workspace: true },
+  });
+  if (!membership) {
+    throw new AppError(403, "No access to this workspace", "FORBIDDEN");
+  }
+
+  const updateData: { name?: string | null; phone?: string | null } = {};
+  if (input.name !== undefined) {
+    updateData.name = input.name ? input.name.trim() : null;
+  }
+  if (input.phone !== undefined) {
+    if (input.phone && input.phone.trim()) {
+      const v = validateAndFormatPhone(input.phone);
+      if (!v.valid) {
+        throw new AppError(400, v.message, "INVALID_PHONE");
+      }
+      updateData.phone = v.e164;
+    } else {
+      updateData.phone = null;
+    }
+  }
+
+  const updatedUser =
+    Object.keys(updateData).length > 0
+      ? await prisma.user.update({
+          where: { id: userId },
+          data: updateData,
+        })
+      : membership.user;
+
+  return {
+    user: toSafeUser(updatedUser),
+    workspace: {
+      id: membership.workspace.id,
+      name: membership.workspace.name,
+      slug: membership.workspace.slug,
+      role: membership.role,
+    },
+  };
+}
+
+export async function changePasswordForUser(
+  userId: string,
+  input: {
+    currentPassword?: string;
+    newPassword: string;
+  }
+) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+  });
+  if (!user) {
+    throw new AppError(404, "User not found", "USER_NOT_FOUND");
+  }
+  assertUserNotBlocked(user);
+
+  if (user.passwordHash) {
+    if (!input.currentPassword) {
+      throw new AppError(
+        400,
+        "Current password is required",
+        "CURRENT_PASSWORD_REQUIRED"
+      );
+    }
+    const matches = await verifyPassword(
+      input.currentPassword,
+      user.passwordHash
+    );
+    if (!matches) {
+      throw new AppError(
+        400,
+        "Current password is incorrect",
+        "INVALID_CURRENT_PASSWORD"
+      );
+    }
+  }
+
+  const passwordHash = await hashPassword(input.newPassword);
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash },
+  });
+
+  return { ok: true, message: "Password updated successfully" };
+}
+
+
