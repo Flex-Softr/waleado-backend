@@ -25,6 +25,16 @@ const singleSendSchema = z.discriminatedUnion("kind", [
     kind: z.literal("template"),
     templateId: z.string().uuid(),
   }),
+  z.object({
+    deviceId: z.string().uuid(),
+    toPhone: z.string().min(3),
+    kind: z.literal("media"),
+    bodyText: z.string().max(4096).optional(),
+    fileUrl: z.string().optional(),
+    fileBase64: z.string().optional(),
+    fileName: z.string().max(255).optional(),
+    mimeType: z.string().max(100).optional(),
+  }),
 ]);
 
 function asyncHandler(

@@ -24,19 +24,72 @@ export type SingleSendPayload =
       toPhone: string;
       kind: "template";
       templateId: string;
+    }
+  | {
+      deviceId: string;
+      toPhone: string;
+      kind: "media";
+      bodyText?: string;
+      fileBuffer?: Buffer;
+      fileBase64?: string;
+      fileUrl?: string;
+      fileName?: string;
+      mimeType?: string;
     };
 
 export type OutboundJson = {
   id: string;
   status: "queued" | "sent" | "failed" | "simulated";
-  kind: "text" | "template";
+  kind: "text" | "template" | "media";
   toPhone: string;
   deviceId: string;
   templateId: string | null;
   bodyText: string | null;
+  fileName?: string | null;
   createdAt: string;
   note?: string;
 };
+
+function inferMimeType(fileName?: string, defaultMime = "application/octet-stream"): string {
+  if (!fileName) return defaultMime;
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "pdf":
+      return "application/pdf";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "mp4":
+      return "video/mp4";
+    case "mp3":
+      return "audio/mpeg";
+    case "ogg":
+    case "opus":
+      return "audio/ogg";
+    case "doc":
+      return "application/msword";
+    case "docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case "xls":
+      return "application/vnd.ms-excel";
+    case "xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case "csv":
+      return "text/csv";
+    case "txt":
+      return "text/plain";
+    case "zip":
+      return "application/zip";
+    default:
+      return defaultMime;
+  }
+}
 
 function statusToApi(s: OutboundStatus): OutboundJson["status"] {
   switch (s) {
@@ -78,11 +131,13 @@ export async function sendSingleMessage(
 
   let templateId: string | null = null;
   let bodyText: string | null = null;
+  let resolvedFileName: string | null = null;
   let kind: OutboundKind;
   /** Resolved Baileys payload for template sends (after validation). */
   let templateWaContent: Awaited<
     ReturnType<typeof buildTemplateWhatsAppContent>
   > | null = null;
+  let mediaWaContent: import("@whiskeysockets/baileys").AnyMessageContent | null = null;
   let textToSend: string;
 
   if (payload.kind === "text") {
@@ -100,7 +155,7 @@ export async function sendSingleMessage(
     bodyText = text;
     textToSend = text;
     kind = OutboundKind.TEXT;
-  } else {
+  } else if (payload.kind === "template") {
     const tpl = await requireActiveTemplate(workspaceId, payload.templateId);
     try {
       templateWaContent = await buildTemplateWhatsAppContent(workspaceId, tpl);
@@ -122,6 +177,87 @@ export async function sendSingleMessage(
     templateId = tpl.id;
     bodyText = null;
     kind = OutboundKind.TEMPLATE;
+  } else if (payload.kind === "media") {
+    let buffer: Buffer;
+    let resolvedMime = (payload.mimeType || "").trim();
+    let resolvedName = (payload.fileName || "").trim();
+
+    if (payload.fileBuffer && Buffer.isBuffer(payload.fileBuffer)) {
+      buffer = payload.fileBuffer;
+    } else if (payload.fileBase64) {
+      let b64 = payload.fileBase64.trim();
+      const match = b64.match(/^data:([^;]+);base64,(.+)$/s);
+      if (match) {
+        if (!resolvedMime) resolvedMime = match[1];
+        b64 = match[2];
+      }
+      buffer = Buffer.from(b64, "base64");
+    } else if (payload.fileUrl) {
+      const url = payload.fileUrl.trim();
+      try {
+        const fetchRes = await fetch(url, {
+          signal: AbortSignal.timeout(25000),
+          headers: { "User-Agent": "LeadWhatsApp-API/1.0" },
+        });
+        if (!fetchRes.ok) {
+          throw new Error(`HTTP ${fetchRes.status} ${fetchRes.statusText}`);
+        }
+        const ab = await fetchRes.arrayBuffer();
+        buffer = Buffer.from(ab);
+        if (!resolvedMime) {
+          resolvedMime = fetchRes.headers.get("content-type")?.split(";")[0]?.trim() || "";
+        }
+        if (!resolvedName) {
+          try {
+            const parsed = new URL(url);
+            resolvedName = parsed.pathname.split("/").pop() || "";
+          } catch {}
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new AppError(400, `Failed to download file from fileUrl: ${msg}`, "MEDIA_DOWNLOAD_FAILED");
+      }
+    } else {
+      throw new AppError(400, "Media payload must include fileBuffer, fileBase64, or fileUrl", "VALIDATION");
+    }
+
+    if (!buffer || buffer.length === 0) {
+      throw new AppError(400, "Media file is empty (0 bytes)", "VALIDATION");
+    }
+
+    if (!resolvedName) {
+      resolvedName = resolvedMime.includes("pdf") ? "invoice.pdf" : "document.pdf";
+    }
+    if (!resolvedMime || resolvedMime === "application/octet-stream") {
+      resolvedMime = inferMimeType(resolvedName, "application/pdf");
+    }
+
+    resolvedFileName = resolvedName;
+    const caption = payload.bodyText?.trim() || undefined;
+    if (caption && caption.length > 4096) {
+      throw new AppError(400, "Caption is too long (max 4096 characters)", "VALIDATION");
+    }
+
+    if (resolvedMime.startsWith("image/")) {
+      mediaWaContent = { image: buffer, ...(caption ? { caption } : {}), mimetype: resolvedMime };
+    } else if (resolvedMime.startsWith("video/")) {
+      mediaWaContent = { video: buffer, ...(caption ? { caption } : {}), mimetype: resolvedMime };
+    } else if (resolvedMime.startsWith("audio/")) {
+      mediaWaContent = { audio: buffer, mimetype: resolvedMime, ptt: false };
+    } else {
+      mediaWaContent = {
+        document: buffer,
+        mimetype: resolvedMime || "application/pdf",
+        fileName: resolvedName || "document.pdf",
+        ...(caption ? { caption } : {}),
+      };
+    }
+
+    bodyText = caption || `[File: ${resolvedName}]`;
+    textToSend = bodyText;
+    kind = OutboundKind.TEXT;
+  } else {
+    throw new AppError(400, "Invalid message kind", "VALIDATION");
   }
 
   const row = await prisma.outboundMessage.create({
@@ -192,13 +328,15 @@ export async function sendSingleMessage(
 
   try {
     const outgoing =
-      kind === OutboundKind.TEXT
+      payload.kind === "text"
         ? { text: textToSend }
-        : templateWaContent!;
+        : payload.kind === "template"
+          ? templateWaContent!
+          : mediaWaContent!;
     const waMsg = await withDeviceOutboundGate(
       device.id,
       { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
-      () => sock.sendMessage(jid, outgoing)
+      () => sock.sendMessage(jid, outgoing as never)
     );
     const key = waMsg?.key;
     const providerRef = key?.id
@@ -219,11 +357,12 @@ export async function sendSingleMessage(
     return {
       id: final.id,
       status: statusToApi(final.status),
-      kind: final.kind === OutboundKind.TEXT ? "text" : "template",
+      kind: payload.kind,
       toPhone: final.toPhone,
       deviceId: final.deviceId,
       templateId: final.templateId,
       bodyText: final.bodyText,
+      fileName: resolvedFileName,
       createdAt: final.createdAt.toISOString(),
       note: `Sent from device “${device.name}” via your linked WhatsApp.`,
     };
