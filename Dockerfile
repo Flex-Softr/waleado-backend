@@ -34,6 +34,9 @@ COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 RUN mkdir -p /app/.wa-sessions /app/uploads/template-media \
   && chown -R node:node /app/.wa-sessions /app/uploads
 
+# Ensure Docker automatically mounts persistent anonymous volumes if host volumes are omitted
+VOLUME ["/app/.wa-sessions", "/app/uploads"]
+
 USER node
 
 EXPOSE 5001

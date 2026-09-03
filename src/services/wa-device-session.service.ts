@@ -4,9 +4,14 @@ import type { Boom } from "@hapi/boom";
 import type { WASocket } from "@whiskeysockets/baileys";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import pino from "pino";
-import { DeviceStatus } from "@prisma/client";
+import {
+  DeviceStatus,
+  NotificationAudience,
+  NotificationType,
+} from "@prisma/client";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
+import { createNotification } from "./notifications.service";
 import { dispatchAutoRepliesForInbound } from "./auto_reply_inbound.service";
 import {
   recordCampaignMessageReceiptUpdates,
@@ -31,6 +36,63 @@ type SessionEntry = {
 
 const sessions = new Map<string, SessionEntry>();
 const startLocks = new Map<string, Promise<void>>();
+const reconnectTimers = new Map<string, NodeJS.Timeout>();
+const reconnectAttempts = new Map<string, number>();
+
+function clearPendingReconnect(deviceId: string): void {
+  const timer = reconnectTimers.get(deviceId);
+  if (timer) {
+    clearTimeout(timer);
+    reconnectTimers.delete(deviceId);
+  }
+  reconnectAttempts.delete(deviceId);
+}
+
+function scheduleDeviceReconnect(
+  deviceId: string,
+  workspaceId: string,
+  baseDelayMs = 2500
+): void {
+  const existingTimer = reconnectTimers.get(deviceId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    reconnectTimers.delete(deviceId);
+  }
+
+  const attempts = reconnectAttempts.get(deviceId) ?? 0;
+  // Exponential backoff: 2.5s, 5s, 10s, 20s, up to 30s
+  const delay = Math.min(
+    30_000,
+    Math.round(baseDelayMs * Math.pow(1.5, Math.min(attempts, 6)))
+  );
+  reconnectAttempts.set(deviceId, attempts + 1);
+
+  console.log(
+    `[wa-session] scheduling auto-reconnect for device ${deviceId} in ${(delay / 1000).toFixed(1)}s (attempt #${attempts + 1})`
+  );
+
+  const timer = setTimeout(async () => {
+    reconnectTimers.delete(deviceId);
+    try {
+      const dev = await prisma.device.findUnique({
+        where: { id: deviceId },
+        select: { status: true },
+      });
+      // Only reconnect if the device is still supposed to be connected
+      if (dev && dev.status === DeviceStatus.CONNECTED) {
+        await ensureWaDeviceSession(deviceId, workspaceId);
+      }
+    } catch (err) {
+      console.error(
+        `[wa-session] auto-reconnect failed for device ${deviceId}:`,
+        err
+      );
+    }
+  }, delay);
+
+  timer.unref();
+  reconnectTimers.set(deviceId, timer);
+}
 
 function sessionsBaseDir(): string {
   if (env.WA_SESSIONS_DIR?.trim()) {
@@ -492,6 +554,44 @@ export async function ensureWaDeviceSession(
     const dir = deviceSessionPath(workspaceId, deviceId);
     fs.mkdirSync(dir, { recursive: true });
 
+    // Check if device is marked CONNECTED in DB, but auth files are absent on disk
+    // (Typical when Docker container was restarted without a persistent volume)
+    const credsPath = path.join(dir, "creds.json");
+    const hasCreds = fs.existsSync(credsPath);
+
+    const dbDevice = await prisma.device.findUnique({
+      where: { id: deviceId },
+      select: { status: true },
+    });
+
+    if (dbDevice?.status === DeviceStatus.CONNECTED && !hasCreds) {
+      console.warn(
+        `[wa-session] Device ${deviceId} is marked CONNECTED in DB, but creds.json is missing in ${dir}! ` +
+          `This happens when Docker restarts without a persistent volume mounted for .wa-sessions. ` +
+          `Resetting device status to QR_READY.`
+      );
+      await prisma.device.update({
+        where: { id: deviceId },
+        data: {
+          status: DeviceStatus.QR_READY,
+          phone: null,
+          profilePictureUrl: null,
+          isDefault: false,
+        },
+      });
+      void createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId,
+        type: NotificationType.DEVICE_DISCONNECTED,
+        title: "WhatsApp Device Needs Re-linking",
+        message:
+          "Session credentials were not found on the server (e.g. after container redeploy). Please scan the QR code to re-link.",
+        link: "/devices",
+        metadata: { deviceId, reason: "CREDS_MISSING" },
+      });
+      return;
+    }
+
     try {
       const baileys = await import("@whiskeysockets/baileys");
       const makeWASocket = baileys.default;
@@ -523,6 +623,9 @@ export async function ensureWaDeviceSession(
         logger: silentLogger,
         syncFullHistory: false,
         browser: Browsers.appropriate("Chrome"),
+        keepAliveIntervalMs: 25_000,
+        connectTimeoutMs: 60_000,
+        defaultQueryTimeoutMs: 60_000,
       });
 
       const entry = sessions.get(deviceId);
@@ -546,6 +649,7 @@ export async function ensureWaDeviceSession(
         if (connection === "open") {
           ent.qr = null;
           ent.connection = "open";
+          clearPendingReconnect(deviceId);
           const phone = ownPhoneFromCreds(sock);
 
           void prisma.device
@@ -596,9 +700,20 @@ export async function ensureWaDeviceSession(
           }
           ent.sock = null;
 
-          const code = (lastDisconnect?.error as Boom | undefined)?.output
-            ?.statusCode;
-          if (code === DisconnectReason.loggedOut) {
+          const error = lastDisconnect?.error as Boom | undefined;
+          const code = error?.output?.statusCode;
+          console.warn(
+            `[wa-session] connection closed for device ${deviceId}, statusCode: ${code}, reason: ${error?.message || "unknown"}`
+          );
+
+          const isLoggedOut = code === DisconnectReason.loggedOut;
+          const isReplaced = code === DisconnectReason.connectionReplaced;
+          const isBadSession = code === DisconnectReason.badSession;
+
+          if (isLoggedOut || isReplaced || isBadSession) {
+            console.log(
+              `[wa-session] permanent disconnect (code: ${code}) for device ${deviceId}. Resetting to QR_READY.`
+            );
             void prisma.device
               .update({
                 where: { id: deviceId },
@@ -611,7 +726,26 @@ export async function ensureWaDeviceSession(
               })
               .catch(() => {});
             void stopWaDeviceSession(deviceId, workspaceId).catch(() => {});
+            void createNotification({
+              audience: NotificationAudience.CUSTOMER,
+              workspaceId,
+              type: NotificationType.DEVICE_DISCONNECTED,
+              title: "WhatsApp Device Disconnected",
+              message: isLoggedOut
+                ? "Your WhatsApp session was logged out from your phone. Please scan the QR code to re-connect."
+                : isReplaced
+                ? "WhatsApp session was opened on another client. Please scan QR to re-connect."
+                : "WhatsApp session expired. Please scan QR to re-connect.",
+              link: "/devices",
+              metadata: { deviceId, code },
+            });
+            return;
           }
+
+          // Auto-reconnect for transient disconnects (515 restartRequired, 428 connectionClosed, 408 timedOut/connectionLost, network blips)
+          const isRestartRequired = code === DisconnectReason.restartRequired;
+          const initialDelay = isRestartRequired ? 1500 : 3000;
+          scheduleDeviceReconnect(deviceId, workspaceId, initialDelay);
         }
       });
 
@@ -720,6 +854,7 @@ export async function stopWaDeviceSession(
   deviceId: string,
   workspaceId: string
 ): Promise<void> {
+  clearPendingReconnect(deviceId);
   const entry = sessions.get(deviceId);
   if (entry?.sock) {
     try {
@@ -742,3 +877,78 @@ export async function stopWaDeviceSession(
     /* ignore */
   }
 }
+
+let watchdogInterval: NodeJS.Timeout | null = null;
+
+/**
+ * Periodically checks all devices marked CONNECTED in the database.
+ * If any device has lost its in-memory WebSocket (e.g. dropped connection,
+ * server idle timeout), it automatically restores the live session using saved credentials.
+ * If credentials are missing (e.g. container recreated without persistent volume),
+ * it resets the status to QR_READY to prevent false "Connected" display.
+ */
+export function startWaDeviceWatchdog(): void {
+  if (watchdogInterval) return;
+  console.log("[wa-watchdog] starting periodic device health monitor (60s interval)");
+
+  watchdogInterval = setInterval(async () => {
+    if (!env.WHATSAPP_BRIDGE_ENABLED) return;
+    try {
+      const connected = await prisma.device.findMany({
+        where: { status: DeviceStatus.CONNECTED },
+        select: { id: true, workspaceId: true },
+      });
+
+      for (const d of connected) {
+        const ent = sessions.get(d.id);
+        const isOpen = ent?.sock && ent.connection === "open";
+        if (!isOpen) {
+          const dir = deviceSessionPath(d.workspaceId, d.id);
+          const hasCreds = fs.existsSync(path.join(dir, "creds.json"));
+          if (hasCreds) {
+            console.log(
+              `[wa-watchdog] Device ${d.id} is marked CONNECTED in DB but in-memory socket is ${ent?.connection ?? "null"}. Auto-reconnecting...`
+            );
+            void ensureWaDeviceSession(d.id, d.workspaceId);
+          } else {
+            console.warn(
+              `[wa-watchdog] Device ${d.id} missing credentials in ${dir}. Resetting DB status to QR_READY.`
+            );
+            await prisma.device.update({
+              where: { id: d.id },
+              data: {
+                status: DeviceStatus.QR_READY,
+                phone: null,
+                profilePictureUrl: null,
+                isDefault: false,
+              },
+            });
+            void createNotification({
+              audience: NotificationAudience.CUSTOMER,
+              workspaceId: d.workspaceId,
+              type: NotificationType.DEVICE_DISCONNECTED,
+              title: "Device Session Lost",
+              message:
+                "WhatsApp session credentials were not found on the server. Please scan the QR code again.",
+              link: "/devices",
+              metadata: { deviceId: d.id, reason: "MISSING_CREDS" },
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[wa-watchdog] error during device health sweep:", err);
+    }
+  }, 60_000);
+
+  watchdogInterval.unref();
+}
+
+export function stopWaDeviceWatchdog(): void {
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+    console.log("[wa-watchdog] stopped periodic device health monitor");
+  }
+}
+

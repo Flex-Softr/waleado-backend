@@ -6,7 +6,11 @@ import {
   startBulkCampaignScheduledWorker,
   stopBulkCampaignScheduledWorker,
 } from "./services/bulk_campaigns.service";
-import { ensureConnectedWaSessionsOnStartup } from "./services/wa-device-session.service";
+import {
+  ensureConnectedWaSessionsOnStartup,
+  startWaDeviceWatchdog,
+  stopWaDeviceWatchdog,
+} from "./services/wa-device-session.service";
 
 // ==========================================
 // 1. Process-Level Crash Protection
@@ -31,6 +35,7 @@ const server = app.listen(port, () => {
     `[whatsapp] bridge ${env.WHATSAPP_BRIDGE_ENABLED ? "ENABLED (real QR + send)" : "DISABLED (outbound simulated)"}`
   );
   startBulkCampaignScheduledWorker();
+  startWaDeviceWatchdog();
   void ensureConnectedWaSessionsOnStartup();
   void expireAllDueSslCommerzWorkspaces().catch((err) => {
     console.error("[billing] SSLCommerz expiry sweep failed", err);
@@ -55,6 +60,7 @@ async function handleShutdown(signal: string): Promise<void> {
 
   // Clear recurring timers
   clearInterval(sslInterval);
+  stopWaDeviceWatchdog();
 
   // Stop accepting new incoming HTTP connections
   server.close(() => {
