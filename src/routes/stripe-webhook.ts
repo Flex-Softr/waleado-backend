@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import type Stripe from "stripe";
-import { Prisma } from "@prisma/client";
+import { Prisma, NotificationAudience, NotificationType } from "@prisma/client";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
 import { getStripe } from "../lib/stripe-client";
@@ -8,6 +8,7 @@ import {
   handleSubscriptionDeleted,
   syncWorkspaceFromSubscription,
 } from "../services/billing.service";
+import { createNotification } from "../services/notifications.service";
 
 export async function stripeWebhookHandler(
   req: Request,
@@ -74,6 +75,25 @@ export async function stripeWebhookHandler(
               : session.subscription.id;
           const sub = await stripe.subscriptions.retrieve(subId);
           await syncWorkspaceFromSubscription(sub);
+
+          const total = session.amount_total != null ? (session.amount_total / 100).toFixed(2) : "";
+          const curr = (session.currency ?? "usd").toUpperCase();
+          const customerEmail = session.customer_details?.email ?? session.customer_email ?? "";
+
+          void createNotification({
+            audience: NotificationAudience.ADMIN,
+            type: NotificationType.PAYMENT_RECEIVED,
+            title: `Stripe Payment: ${curr} ${total}`,
+            message: `New subscription payment confirmed${customerEmail ? ` from ${customerEmail}` : ""}.`,
+            link: "/admin/billing",
+            metadata: {
+              sessionId: session.id,
+              subscriptionId: subId,
+              amount: total,
+              currency: curr,
+              gateway: "stripe",
+            },
+          });
         }
         break;
       }

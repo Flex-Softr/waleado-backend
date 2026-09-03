@@ -21,8 +21,12 @@ import {
   aiCatalogRouter,
   aiCredentialsRouter,
 } from "./ai-credentials.routes";
+import { notificationsRouter } from "./notifications.routes";
 
 const apiRouter = Router();
+
+// Notifications
+apiRouter.use("/notifications", notificationsRouter);
 
 // Public and Authentication
 apiRouter.use("/public", publicRouter);

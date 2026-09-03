@@ -8,6 +8,8 @@ import {
   BulkUniquenessMode,
   ContactStatus,
   DeviceStatus,
+  NotificationAudience,
+  NotificationType,
   OutboundKind,
   OutboundStatus,
   Prisma,
@@ -52,6 +54,7 @@ import {
   pickBodyTextForRecipient,
   type BulkAiRewriteInput,
 } from "./bulk_message_variants.service";
+import { createNotification } from "./notifications.service";
 
 const MAX_RECIPIENTS = 2000;
 const OUTBOUND_CHUNK = 250;
@@ -2261,17 +2264,54 @@ async function processSingleCampaign(campaign: BulkCampaign): Promise<void> {
       campaign.workspaceId,
       campaign.id
     );
+
+    const finalStatus =
+      result.stoppedByFailLimit ||
+      result.stoppedByDailyCap ||
+      pendingLeft > 0
+        ? BulkCampaignStatus.PAUSED
+        : BulkCampaignStatus.COMPLETED;
+
     await prisma.bulkCampaign.updateMany({
       where: { id: campaign.id, status: { not: BulkCampaignStatus.PAUSED } },
-      data: {
-        status:
-          result.stoppedByFailLimit ||
-          result.stoppedByDailyCap ||
-          pendingLeft > 0
-            ? BulkCampaignStatus.PAUSED
-            : BulkCampaignStatus.COMPLETED,
-      },
+      data: { status: finalStatus },
     });
+
+    if (finalStatus === BulkCampaignStatus.COMPLETED) {
+      await createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId: campaign.workspaceId,
+        type: NotificationType.CAMPAIGN_COMPLETED,
+        title: `Campaign Completed: ${campaign.name}`,
+        message: `All messages processed. ${result.dispatched} message(s) dispatched successfully.`,
+        link: `/bulk-messages/${campaign.id}`,
+        metadata: {
+          campaignId: campaign.id,
+          campaignName: campaign.name,
+          dispatched: result.dispatched,
+        },
+      });
+    } else if (result.stoppedByDailyCap) {
+      await createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId: campaign.workspaceId,
+        type: NotificationType.CAMPAIGN_PAUSED,
+        title: `Campaign Paused (Daily Cap): ${campaign.name}`,
+        message: `Paused automatically: daily device message ceiling reached. Resume tomorrow to protect your WhatsApp account.`,
+        link: `/bulk-messages/${campaign.id}`,
+        metadata: { campaignId: campaign.id, reason: "DAILY_CAP" },
+      });
+    } else if (result.stoppedByFailLimit) {
+      await createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId: campaign.workspaceId,
+        type: NotificationType.CAMPAIGN_PAUSED,
+        title: `Campaign Paused (Fail Limit): ${campaign.name}`,
+        message: `Paused automatically: consecutive send errors reached the anti-block safety threshold.`,
+        link: `/bulk-messages/${campaign.id}`,
+        metadata: { campaignId: campaign.id, reason: "FAIL_LIMIT" },
+      });
+    }
   } catch (err) {
     console.error(
       `[bulk-campaigns] unexpected error executing campaign ${campaign.id}:`,

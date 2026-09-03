@@ -1,8 +1,10 @@
+import { NotificationAudience, NotificationType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { env } from "../env";
 import { apiPaidPlanToDb, planToApi, type PlanIdApi } from "../lib/plan-mapping";
 import * as sslApi from "./sslcommerz/sslcommerz-api";
+import { createNotification } from "../services/notifications.service";
 
 const PAID_STATUSES = new Set(["VALID", "VALIDATED"]);
 
@@ -77,6 +79,51 @@ export async function fulfillSslCommerzByValId(input: {
       },
     }),
   ]);
+
+  void (async () => {
+    try {
+      const ws = await prisma.workspace.findUnique({
+        where: { id: row.workspaceId },
+        select: { name: true },
+      });
+      const wsName = ws?.name ?? "Workspace";
+
+      // Admin alert: new payment received
+      await createNotification({
+        audience: NotificationAudience.ADMIN,
+        type: NotificationType.PAYMENT_RECEIVED,
+        title: `Payment Received: ${row.currency} ${Number(row.amount).toFixed(2)}`,
+        message: `SSLCommerz payment confirmed for workspace "${wsName}" (${row.planId.toUpperCase()} Plan, Tran ID: ${row.tranId}).`,
+        link: "/admin/billing",
+        metadata: {
+          tranId: row.tranId,
+          amount: Number(row.amount),
+          currency: row.currency,
+          gateway: "sslcommerz",
+          planId: row.planId,
+          workspaceId: row.workspaceId,
+        },
+      });
+
+      // Customer alert: payment received & upgraded
+      await createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId: row.workspaceId,
+        type: NotificationType.PAYMENT_RECEIVED,
+        title: `Payment Confirmed: ${row.planId.toUpperCase()} Plan`,
+        message: `Your payment of ${row.currency} ${Number(row.amount).toFixed(2)} was received successfully. Your plan is now active!`,
+        link: "/billing",
+        metadata: {
+          tranId: row.tranId,
+          amount: Number(row.amount),
+          currency: row.currency,
+          gateway: "sslcommerz",
+        },
+      });
+    } catch (e) {
+      console.warn("[sslcommerz] payment notification creation failed:", e);
+    }
+  })();
 
   return { planId: row.planId as PlanIdApi };
 }

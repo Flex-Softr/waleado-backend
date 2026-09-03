@@ -180,6 +180,7 @@ model User {
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
   memberships         Membership[]
+  notifications       Notification[]
 }
 
 model RefreshToken {
@@ -237,6 +238,7 @@ model Workspace {
   liveChatThreads        LiveChatThread[]
   aiCredentials          AiCredential[]
   apiCredentials         ApiCredential[]
+  notifications          Notification[]
 }
 
 /**
@@ -692,3 +694,47 @@ model Membership {
   @@unique([userId, workspaceId])
   @@index([workspaceId])
 }
+
+enum NotificationAudience {
+  CUSTOMER
+  ADMIN
+  ALL
+}
+
+enum NotificationType {
+  CAMPAIGN_COMPLETED
+  CAMPAIGN_PAUSED
+  CAMPAIGN_FAILED
+  DEVICE_DISCONNECTED
+  DEVICE_CONNECTED
+  SUBSCRIPTION_EXPIRING
+  PAYMENT_RECEIVED
+  SUBSCRIPTION_CANCELED
+  USER_REGISTERED
+  SYSTEM_ALERT
+}
+
+model Notification {
+  id          String               @id @default(uuid())
+  audience    NotificationAudience @default(CUSTOMER)
+  workspaceId String?              @map("workspace_id")
+  workspace   Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String?              @map("user_id")
+  user        User?                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        NotificationType
+  title       String               @db.VarChar(255)
+  message     String               @db.Text
+  link        String?              @db.VarChar(500)
+  isRead      Boolean              @default(false) @map("is_read")
+  readAt      DateTime?            @map("read_at")
+  metadata    Json?
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
+
+  @@index([workspaceId, audience, isRead])
+  @@index([audience, isRead])
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
