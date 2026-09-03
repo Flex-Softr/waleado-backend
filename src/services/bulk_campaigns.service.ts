@@ -1,4 +1,5 @@
 import {
+  BulkCampaign,
   BulkCampaignRecipientStatus,
   BulkCampaignStatus,
   BulkDeviceMode,
@@ -57,7 +58,9 @@ const OUTBOUND_CHUNK = 250;
 const SCHEDULED_POLL_MS = 15_000;
 const FAILOVER_DEVICE_GAP_MS = 5_000;
 let scheduledLoopStarted = false;
-let scheduledLoopBusy = false;
+let scheduledInterval: NodeJS.Timeout | null = null;
+let isShuttingDown = false;
+const activeCampaignIds = new Set<string>();
 /** WhatsApp anti-spam: minimum pause between bulk sends (seconds). */
 const WHATSAPP_MIN_DELAY_SEC = Math.ceil(WA_DEVICE_BULK_MIN_GAP_MS / 1000);
 
@@ -1841,6 +1844,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
    * Resume sets status back to PENDING/SCHEDULED for the next worker tick.
    */
   async function waitWhilePaused(): Promise<boolean> {
+    if (isShuttingDown) return false;
     const row = await prisma.bulkCampaign.findFirst({
       where: { id: campaignId, workspaceId },
       select: { status: true },
@@ -1858,6 +1862,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
 
   async function waitUntilSendAllowed(): Promise<boolean> {
     while (antiBlock.enabled && !canSendAt(new Date(), antiBlock)) {
+      if (isShuttingDown) return false;
       const available = await waitWhilePaused();
       if (!available) return false;
       const slept = await sleepWithCampaignChecks(30_000);
@@ -1869,6 +1874,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
   async function sleepWithCampaignChecks(ms: number): Promise<boolean> {
     const deadline = Date.now() + Math.max(0, ms);
     while (Date.now() < deadline) {
+      if (isShuttingDown) return false;
       const available = await waitWhilePaused();
       if (!available) return false;
       const remaining = deadline - Date.now();
@@ -2186,13 +2192,112 @@ function parseStoredPhones(value: Prisma.JsonValue): string[] {
   return value.filter((x): x is string => typeof x === "string");
 }
 
+async function processSingleCampaign(campaign: BulkCampaign): Promise<void> {
+  try {
+    const phones = await applyPhoneFilters(
+      campaign.workspaceId,
+      parseStoredPhones(campaign.recipientPhones),
+      {
+        enabled: campaign.antiBlockEnabled,
+        spintaxEnabled: campaign.spintaxEnabled,
+        verifyNumbers: true,
+        repliedOnly: campaign.repliedOnly,
+        recent24hOnly: campaign.recent24hOnly,
+        uniquenessMode: campaign.uniquenessMode,
+        batchPauseEvery: campaign.batchPauseEvery,
+        batchPauseSec: campaign.batchPauseSec,
+        failLimitInRow: campaign.failLimitInRow,
+        activeHoursStart: campaign.activeHoursStart,
+        activeHoursEnd: campaign.activeHoursEnd,
+        inactiveHoursStart: campaign.inactiveHoursStart,
+        inactiveHoursEnd: campaign.inactiveHoursEnd,
+        timezone: campaign.timezone,
+      }
+    );
+
+    const result = await executeCampaignDispatch({
+      campaignId: campaign.id,
+      workspaceId: campaign.workspaceId,
+      phones,
+      deviceIds: parseStoredDeviceIds(campaign.deviceIds),
+      deviceMode: campaign.deviceMode,
+      kind: campaign.kind,
+      bodyText: campaign.bodyText,
+      bodyTexts: parseStoredBodyTexts(campaign.bodyTexts, campaign.bodyText),
+      templateId: campaign.templateId,
+      attachmentType: campaign.attachmentType,
+      attachmentAssetId: campaign.attachmentAssetId,
+      delayMinSec: campaign.delayMinSec,
+      delayMaxSec: campaign.delayMaxSec,
+      maxRetries: campaign.maxRetries,
+      antiBlock: {
+        enabled: campaign.antiBlockEnabled,
+        spintaxEnabled: campaign.spintaxEnabled,
+        verifyNumbers: true,
+        repliedOnly: campaign.repliedOnly,
+        recent24hOnly: campaign.recent24hOnly,
+        uniquenessMode: campaign.uniquenessMode,
+        batchPauseEvery: campaign.batchPauseEvery,
+        batchPauseSec: campaign.batchPauseSec,
+        failLimitInRow: campaign.failLimitInRow,
+        activeHoursStart: campaign.activeHoursStart,
+        activeHoursEnd: campaign.activeHoursEnd,
+        inactiveHoursStart: campaign.inactiveHoursStart,
+        inactiveHoursEnd: campaign.inactiveHoursEnd,
+        timezone: campaign.timezone,
+      },
+    });
+
+    if (isShuttingDown) {
+      // Revert to PENDING so next server run resumes automatically
+      await prisma.bulkCampaign.updateMany({
+        where: { id: campaign.id, status: BulkCampaignStatus.RUNNING },
+        data: { status: BulkCampaignStatus.PENDING },
+      });
+      return;
+    }
+
+    const pendingLeft = await countPendingCampaignRecipients(
+      campaign.workspaceId,
+      campaign.id
+    );
+    await prisma.bulkCampaign.updateMany({
+      where: { id: campaign.id, status: { not: BulkCampaignStatus.PAUSED } },
+      data: {
+        status:
+          result.stoppedByFailLimit ||
+          result.stoppedByDailyCap ||
+          pendingLeft > 0
+            ? BulkCampaignStatus.PAUSED
+            : BulkCampaignStatus.COMPLETED,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[bulk-campaigns] unexpected error executing campaign ${campaign.id}:`,
+      err
+    );
+    await prisma.bulkCampaign
+      .updateMany({
+        where: { id: campaign.id, status: BulkCampaignStatus.RUNNING },
+        data: { status: BulkCampaignStatus.PAUSED },
+      })
+      .catch(() => {});
+  }
+}
+
 export async function runScheduledCampaignsOnce(): Promise<number> {
-  if (scheduledLoopBusy) return 0;
-  scheduledLoopBusy = true;
+  if (isShuttingDown) return 0;
+  const maxConcurrent = env.BULK_CAMPAIGN_MAX_CONCURRENT ?? 5;
+  if (activeCampaignIds.size >= maxConcurrent) return 0;
+
+  const availableSlots = maxConcurrent - activeCampaignIds.size;
   try {
     const now = new Date();
+    const excludeIds = Array.from(activeCampaignIds);
     const due = await prisma.bulkCampaign.findMany({
       where: {
+        ...(excludeIds.length > 0 ? { id: { notIn: excludeIds } } : {}),
         OR: [
           {
             status: BulkCampaignStatus.SCHEDULED,
@@ -2205,106 +2310,76 @@ export async function runScheduledCampaignsOnce(): Promise<number> {
         ],
       },
       orderBy: { scheduledAt: "asc" },
-      take: 5,
+      take: availableSlots,
     });
 
-    let processed = 0;
+    let started = 0;
     for (const campaign of due) {
+      if (activeCampaignIds.size >= maxConcurrent) break;
+      if (activeCampaignIds.has(campaign.id)) continue;
+
       const claimed = await prisma.bulkCampaign.updateMany({
         where: {
           id: campaign.id,
-          status: { in: [BulkCampaignStatus.SCHEDULED, BulkCampaignStatus.PENDING] },
+          status: {
+            in: [BulkCampaignStatus.SCHEDULED, BulkCampaignStatus.PENDING],
+          },
         },
         data: { status: BulkCampaignStatus.RUNNING },
       });
       if (claimed.count === 0) continue;
 
-      const phones = await applyPhoneFilters(
-        campaign.workspaceId,
-        parseStoredPhones(campaign.recipientPhones),
-        {
-          enabled: campaign.antiBlockEnabled,
-          spintaxEnabled: campaign.spintaxEnabled,
-          verifyNumbers: true,
-          repliedOnly: campaign.repliedOnly,
-          recent24hOnly: campaign.recent24hOnly,
-          uniquenessMode: campaign.uniquenessMode,
-          batchPauseEvery: campaign.batchPauseEvery,
-          batchPauseSec: campaign.batchPauseSec,
-          failLimitInRow: campaign.failLimitInRow,
-          activeHoursStart: campaign.activeHoursStart,
-          activeHoursEnd: campaign.activeHoursEnd,
-          inactiveHoursStart: campaign.inactiveHoursStart,
-          inactiveHoursEnd: campaign.inactiveHoursEnd,
-          timezone: campaign.timezone,
-        }
+      activeCampaignIds.add(campaign.id);
+      started += 1;
+      console.log(
+        `[bulk-campaigns] started campaign "${campaign.name}" (${campaign.id}) [active: ${activeCampaignIds.size}/${maxConcurrent}]`
       );
 
-      const result = await executeCampaignDispatch({
-        campaignId: campaign.id,
-        workspaceId: campaign.workspaceId,
-        phones,
-        deviceIds: parseStoredDeviceIds(campaign.deviceIds),
-        deviceMode: campaign.deviceMode,
-        kind: campaign.kind,
-        bodyText: campaign.bodyText,
-        bodyTexts: parseStoredBodyTexts(campaign.bodyTexts, campaign.bodyText),
-        templateId: campaign.templateId,
-        attachmentType: campaign.attachmentType,
-        attachmentAssetId: campaign.attachmentAssetId,
-        delayMinSec: campaign.delayMinSec,
-        delayMaxSec: campaign.delayMaxSec,
-        maxRetries: campaign.maxRetries,
-        antiBlock: {
-          enabled: campaign.antiBlockEnabled,
-          spintaxEnabled: campaign.spintaxEnabled,
-          verifyNumbers: true,
-          repliedOnly: campaign.repliedOnly,
-          recent24hOnly: campaign.recent24hOnly,
-          uniquenessMode: campaign.uniquenessMode,
-          batchPauseEvery: campaign.batchPauseEvery,
-          batchPauseSec: campaign.batchPauseSec,
-          failLimitInRow: campaign.failLimitInRow,
-          activeHoursStart: campaign.activeHoursStart,
-          activeHoursEnd: campaign.activeHoursEnd,
-          inactiveHoursStart: campaign.inactiveHoursStart,
-          inactiveHoursEnd: campaign.inactiveHoursEnd,
-          timezone: campaign.timezone,
-        },
-      });
-      const pendingLeft = await countPendingCampaignRecipients(
-        campaign.workspaceId,
-        campaign.id
-      );
-      await prisma.bulkCampaign.updateMany({
-        where: { id: campaign.id, status: { not: BulkCampaignStatus.PAUSED } },
-        data: {
-          status:
-            result.stoppedByFailLimit ||
-            result.stoppedByDailyCap ||
-            pendingLeft > 0
-              ? BulkCampaignStatus.PAUSED
-              : BulkCampaignStatus.COMPLETED,
-        },
-      });
-      processed += 1;
+      void (async () => {
+        try {
+          await processSingleCampaign(campaign);
+        } finally {
+          activeCampaignIds.delete(campaign.id);
+          console.log(
+            `[bulk-campaigns] finished campaign "${campaign.name}" (${campaign.id}) [active: ${activeCampaignIds.size}/${maxConcurrent}]`
+          );
+        }
+      })();
     }
-    return processed;
+    return started;
   } catch (err) {
     console.error("[bulk-campaigns] scheduled worker error", err);
     return 0;
-  } finally {
-    scheduledLoopBusy = false;
   }
 }
 
 export function startBulkCampaignScheduledWorker(): void {
   if (scheduledLoopStarted) return;
   scheduledLoopStarted = true;
+  isShuttingDown = false;
   void recoverInterruptedBulkCampaigns().then(() => {
     void runScheduledCampaignsOnce();
   });
-  setInterval(() => {
+  scheduledInterval = setInterval(() => {
     void runScheduledCampaignsOnce();
   }, SCHEDULED_POLL_MS);
+}
+
+export async function stopBulkCampaignScheduledWorker(
+  timeoutMs = 5000
+): Promise<void> {
+  isShuttingDown = true;
+  if (scheduledInterval) {
+    clearInterval(scheduledInterval);
+    scheduledInterval = null;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (activeCampaignIds.size > 0 && Date.now() < deadline) {
+    await sleepMs(150);
+  }
+  if (activeCampaignIds.size > 0) {
+    console.warn(
+      `[bulk-campaigns] shutdown timeout reached with ${activeCampaignIds.size} active campaign(s) remaining`
+    );
+  }
 }

@@ -38,6 +38,8 @@ const envSchema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().positive().default(1000),
   /** Morgan log format override ('dev', 'combined', 'common', 'short', 'tiny') */
   MORGAN_FORMAT: z.string().optional(),
+  /** Maximum number of bulk campaigns that can be actively dispatched concurrently (default: 5) */
+  BULK_CAMPAIGN_MAX_CONCURRENT: z.coerce.number().positive().default(5),
   /** Base URL of the Next.js app (success/cancel redirects, no trailing slash) */
   APP_PUBLIC_URL: z.string().default("http://localhost:3000"),
   /**

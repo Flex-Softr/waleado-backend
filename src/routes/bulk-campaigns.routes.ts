@@ -348,6 +348,7 @@ router.post(
       parsed.data,
       body
     );
+    void bulkCampaigns.runScheduledCampaignsOnce();
     res.status(201).json(out);
   })
 );
@@ -413,6 +414,7 @@ router.post(
           : undefined,
       antiBlock: body.antiBlock,
     });
+    void bulkCampaigns.runScheduledCampaignsOnce();
     res.status(201).json(out);
   })
 );
@@ -445,6 +447,7 @@ router.patch(
       throw new AppError(400, "Invalid campaign id", "VALIDATION");
     }
     const campaign = await bulkCampaigns.resumeBulkCampaign(auth.wid, parsed.data);
+    void bulkCampaigns.runScheduledCampaignsOnce();
     res.json({ campaign });
   })
 );
