@@ -1,39 +1,26 @@
 import express from "express";
-import cors from "cors";
-import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { env } from "./env";
-import { errorHandler } from "./middleware/error-handler";
-import { billingRouter } from "./routes/billing.routes";
-import { devicesRouter } from "./routes/devices.routes";
-import { messagesRouter } from "./routes/messages.routes";
-import { templatesRouter } from "./routes/templates.routes";
-import { contactGroupsRouter } from "./routes/contact-groups.routes";
-import { contactsRouter } from "./routes/contacts.routes";
-import { bulkCampaignsRouter } from "./routes/bulk-campaigns.routes";
-import { autoReplyRulesRouter } from "./routes/auto-reply-rules.routes";
-import { callResponderRulesRouter } from "./routes/call-responder-rules.routes";
-import { chatbotFlowsRouter } from "./routes/chatbot-flows.routes";
-import { liveChatRouter } from "./routes/live-chat.routes";
-import { groupGrabberRouter } from "./routes/group-grabber.routes";
-import { dashboardRouter } from "./routes/dashboard.routes";
 import {
-  aiCatalogRouter,
-  aiCredentialsRouter,
-} from "./routes/ai-credentials.routes";
+  helmetMiddleware,
+  corsMiddleware,
+  hppMiddleware,
+} from "./middleware/security";
+import { apiRateLimiter } from "./middleware/rate-limiter";
+import { morganLogger } from "./middleware/morgan";
 import { healthRouter } from "./routes/health.routes";
-import { publicRouter } from "./routes/public.routes";
-import { authRouter } from "./routes/auth.routes";
-import { apiCredentialsRouter } from "./routes/api-credentials.routes";
-import { adminRouter } from "./routes/admin.routes";
-import { openApiRouter } from "./routes/open";
-import { stripeWebhookHandler } from "./routes/stripe-webhook";
-import {
-  sslCommerzBrowserRouter,
-  sslCommerzIpnRouter,
-} from "./routes/sslcommerz-callbacks.routes";
+import { webhookRouter } from "./routes/webhooks.routes";
+import { apiRouter } from "./routes";
+import { errorHandler } from "./middleware/error-handler";
 
 const app = express();
+
+// ==========================================
+// 1. Server & Protocol Configuration
+// ==========================================
+
+// Hide Express banner for security obscurity
+app.disable("x-powered-by");
 
 /** Dynamic JSON API must not emit ETags: browsers send If-None-Match → 304, and fetch treats 304 as !ok so clients break. */
 app.set("etag", false);
@@ -42,86 +29,63 @@ if (env.TRUST_PROXY) {
   app.set("trust proxy", 1);
 }
 
-app.use(
-  helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" },
-  })
-);
+// ==========================================
+// 2. Request Logging & Diagnostics
+// ==========================================
+app.use(morganLogger);
 
-const origins = env.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean);
-if (!origins.length && env.NODE_ENV === "production") {
-  throw new Error("CORS_ORIGIN must be set to at least one origin in production");
-}
-app.use(
-  cors({
-    // Reflect-any with credentials is unsafe; only allow in non-production when unset.
-    origin: origins.length ? origins : true,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Client-Id",
-      "X-Client-Secret",
-    ],
-  })
-);
+// ==========================================
+// 3. Core Security Headers & Safeguards
+// ==========================================
+app.use(helmetMiddleware);
+app.use(corsMiddleware);
+app.use(hppMiddleware);
 
+// ==========================================
+// 4. Rate Limiting & Protection
+// ==========================================
+app.use(apiRateLimiter);
+
+// ==========================================
+// 5. Health & Readiness Probes (Root level)
+// ==========================================
+app.use(healthRouter);
+
+// ==========================================
+// 6. Webhooks & Payment Callbacks
+// Must precede standard body parsers:
+// - Stripe requires raw JSON buffer for signature verification
+// - SSLCommerz requires urlencoded body parsing
+// ==========================================
+app.use("/v1", webhookRouter);
+
+// ==========================================
+// 7. Request Body Parsers & Cookies
+// ==========================================
 app.use(cookieParser());
-
-app.post(
-  "/v1/webhooks/stripe",
-  express.raw({ type: "application/json" }),
-  (req, res, next) => {
-    stripeWebhookHandler(req, res).catch(next);
-  }
-);
-
-app.use(
-  "/v1/webhooks/payments/sslcommerz",
-  express.urlencoded({ extended: false }),
-  sslCommerzIpnRouter
-);
-/** SSLCommerz may GET-redirect or POST form data to success/fail/cancel URLs — parse body when present. */
-app.use(
-  "/v1/payments/sslcommerz",
-  express.urlencoded({ extended: false }),
-  sslCommerzBrowserRouter
-);
-
 app.use(express.json({ limit: env.HTTP_JSON_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: env.HTTP_JSON_BODY_LIMIT }));
 
+// ==========================================
+// 8. API v1 Routes
+// ==========================================
 app.use("/v1", (_req, res, next) => {
   res.setHeader("Cache-Control", "no-store, private");
   next();
 });
 
-app.use(healthRouter);
-app.use("/v1/public", publicRouter);
-app.use("/v1/auth", authRouter);
-app.use("/v1/admin", adminRouter);
-app.use("/v1/api-credentials", apiCredentialsRouter);
-app.use("/v1/open", openApiRouter);
-app.use("/v1/billing", billingRouter);
-app.use("/v1/devices", devicesRouter);
-app.use("/v1/templates", templatesRouter);
-app.use("/v1/messages", messagesRouter);
-app.use("/v1/contact-groups", contactGroupsRouter);
-app.use("/v1/contacts", contactsRouter);
-app.use("/v1/bulk-campaigns", bulkCampaignsRouter);
-app.use("/v1/auto-reply-rules", autoReplyRulesRouter);
-app.use("/v1/call-responder-rules", callResponderRulesRouter);
-app.use("/v1/chatbot-flows", chatbotFlowsRouter);
-app.use("/v1/live-chat", liveChatRouter);
-app.use("/v1/group-grabber", groupGrabberRouter);
-app.use("/v1/dashboard", dashboardRouter);
-app.use("/v1/ai-credentials", aiCredentialsRouter);
-app.use("/v1/ai", aiCatalogRouter);
+app.use("/v1", apiRouter);
 
+// ==========================================
+// 9. 404 Catch-All Handler
+// ==========================================
 app.use((_req, res) => {
   res.status(404).json({ error: { code: "NOT_FOUND", message: "Not found" } });
 });
 
+// ==========================================
+// 10. Global Error Handler
+// ==========================================
 app.use(errorHandler);
 
 export { app };

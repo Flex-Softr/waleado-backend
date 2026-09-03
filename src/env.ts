@@ -32,6 +32,12 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
+  /** General API rate limiting window in ms (default: 15 minutes) */
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().positive().default(15 * 60 * 1000),
+  /** General API rate limiting max requests per window (default: 1000) */
+  RATE_LIMIT_MAX: z.coerce.number().positive().default(1000),
+  /** Morgan log format override ('dev', 'combined', 'common', 'short', 'tiny') */
+  MORGAN_FORMAT: z.string().optional(),
   /** Base URL of the Next.js app (success/cancel redirects, no trailing slash) */
   APP_PUBLIC_URL: z.string().default("http://localhost:3000"),
   /**
