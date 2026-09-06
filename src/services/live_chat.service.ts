@@ -115,7 +115,7 @@ export async function syncThreadsFromOutbound(
     where: { id: deviceId, workspaceId },
   });
   if (!device) {
-    throw new AppError(404, "Device not found", "NOT_FOUND");
+    return;
   }
 
   const groups = await prisma.outboundMessage.groupBy({

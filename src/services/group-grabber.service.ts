@@ -330,11 +330,16 @@ export async function listWaGroupsForDevice(
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    throw new AppError(
-      502,
-      `Could not fetch groups from WhatsApp: ${msg}`,
-      "WA_GROUPS_FAILED"
+    console.warn(
+      `[group-grabber] fetch groups failed for device ${deviceId}: ${msg}`
     );
+    return {
+      bridgeEnabled: true,
+      deviceConnected: false,
+      socketOpen: false,
+      hint: `WhatsApp session is not ready (${msg}). Ensure your device shows Connected on the Devices page and try again.`,
+      groups: [],
+    };
   }
 }
 
@@ -349,7 +354,14 @@ export async function scrapeGroupMembers(
     throw new AppError(400, "Invalid WhatsApp group JID", "VALIDATION");
   }
 
-  await getDeviceOrThrow(deviceId, workspaceId);
+  const dev = await getDeviceOrThrow(deviceId, workspaceId);
+  if (dev.status !== DeviceStatus.CONNECTED) {
+    throw new AppError(
+      400,
+      "Device is not connected to WhatsApp. Please link this device under Devices first.",
+      "DEVICE_NOT_CONNECTED"
+    );
+  }
 
   if (!env.WHATSAPP_BRIDGE_ENABLED) {
     throw new AppError(503, "WhatsApp bridge is disabled", "BRIDGE_DISABLED");
@@ -357,7 +369,11 @@ export async function scrapeGroupMembers(
 
   const sock = await waSession.waitForOpenWaSocket(deviceId, workspaceId, 52000);
   if (!sock) {
-    throw new AppError(503, "WhatsApp session not connected", "WA_NOT_CONNECTED");
+    throw new AppError(
+      503,
+      "WhatsApp session is offline. Please check your connection on the Devices page.",
+      "WA_NOT_CONNECTED"
+    );
   }
 
   let meta: GroupMetadata;

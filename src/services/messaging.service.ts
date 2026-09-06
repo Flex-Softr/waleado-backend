@@ -286,11 +286,12 @@ export async function sendSingleMessage(
     return {
       id: final.id,
       status: statusToApi(final.status),
-      kind: final.kind === OutboundKind.TEXT ? "text" : "template",
+      kind: payload.kind,
       toPhone: final.toPhone,
       deviceId: final.deviceId,
       templateId: final.templateId,
       bodyText: final.bodyText,
+      fileName: resolvedFileName,
       createdAt: final.createdAt.toISOString(),
       note:
         "Bridge is off: set WHATSAPP_BRIDGE_ENABLED=true in the repo root .env, restart the API, then send again. Check the API log on startup for: bridge ENABLED.",
