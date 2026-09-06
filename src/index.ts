@@ -27,29 +27,61 @@ const port = env.PORT;
 const SSLCOMMERZ_EXPIRY_POLL_MS = 60 * 60 * 1000;
 
 // ==========================================
-// 2. Start HTTP Server & Background Workers
+// 2. Database Schema Auto-Healing (Trial Columns)
 // ==========================================
-const server = app.listen(port, () => {
-  console.log(`FlexoWhats API listening on http://localhost:${port}`);
-  console.log(
-    `[whatsapp] bridge ${env.WHATSAPP_BRIDGE_ENABLED ? "ENABLED (real QR + send)" : "DISABLED (outbound simulated)"}`
-  );
-  startBulkCampaignScheduledWorker();
-  startWaDeviceWatchdog();
-  void ensureConnectedWaSessionsOnStartup();
-  void expireAllDueSslCommerzWorkspaces().catch((err) => {
-    console.error("[billing] SSLCommerz expiry sweep failed", err);
-  });
-});
-
-const sslInterval = setInterval(() => {
-  void expireAllDueSslCommerzWorkspaces().catch((err) => {
-    console.error("[billing] SSLCommerz expiry sweep failed", err);
-  });
-}, SSLCOMMERZ_EXPIRY_POLL_MS);
+async function ensureTrialColumnsExist(): Promise<void> {
+  try {
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "User" 
+      ADD COLUMN IF NOT EXISTS "trialUsed" BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS "trialStartedAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "trialEndsAt" TIMESTAMP(3);
+    `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Workspace" 
+      ADD COLUMN IF NOT EXISTS "trialUsed" BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS "trialStartedAt" TIMESTAMP(3),
+      ADD COLUMN IF NOT EXISTS "trialEndsAt" TIMESTAMP(3);
+    `);
+    console.log("[db] Database schema verified (trial columns ensured)");
+  } catch (err) {
+    console.error("[db] Schema auto-ensure warning:", err);
+  }
+}
 
 // ==========================================
-// 3. Graceful Shutdown Handling (SIGTERM, SIGINT)
+// 3. Start HTTP Server & Background Workers
+// ==========================================
+let server: ReturnType<typeof app.listen> | null = null;
+let sslInterval: NodeJS.Timeout | null = null;
+
+async function bootstrap() {
+  await ensureTrialColumnsExist();
+
+  server = app.listen(port, () => {
+    console.log(`FlexoWhats API listening on http://localhost:${port}`);
+    console.log(
+      `[whatsapp] bridge ${env.WHATSAPP_BRIDGE_ENABLED ? "ENABLED (real QR + send)" : "DISABLED (outbound simulated)"}`
+    );
+    startBulkCampaignScheduledWorker();
+    startWaDeviceWatchdog();
+    void ensureConnectedWaSessionsOnStartup();
+    void expireAllDueSslCommerzWorkspaces().catch((err) => {
+      console.error("[billing] SSLCommerz expiry sweep failed", err);
+    });
+  });
+
+  sslInterval = setInterval(() => {
+    void expireAllDueSslCommerzWorkspaces().catch((err) => {
+      console.error("[billing] SSLCommerz expiry sweep failed", err);
+    });
+  }, SSLCOMMERZ_EXPIRY_POLL_MS);
+}
+
+void bootstrap();
+
+// ==========================================
+// 4. Graceful Shutdown Handling (SIGTERM, SIGINT)
 // ==========================================
 let isShuttingDown = false;
 
@@ -59,13 +91,17 @@ async function handleShutdown(signal: string): Promise<void> {
   console.log(`[shutdown] Received ${signal}. Starting graceful shutdown...`);
 
   // Clear recurring timers
-  clearInterval(sslInterval);
+  if (sslInterval) {
+    clearInterval(sslInterval);
+  }
   stopWaDeviceWatchdog();
 
   // Stop accepting new incoming HTTP connections
-  server.close(() => {
-    console.log("[shutdown] HTTP server closed.");
-  });
+  if (server) {
+    server.close(() => {
+      console.log("[shutdown] HTTP server closed.");
+    });
+  }
 
   // Force exit after timeout if tasks hang
   const forceExitTimeout = setTimeout(() => {
