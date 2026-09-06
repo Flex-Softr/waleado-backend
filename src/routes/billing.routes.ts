@@ -35,7 +35,7 @@ router.get(
     if (!auth) {
       throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
     }
-    const data = await billing.getBillingForWorkspace(auth.wid);
+    const data = await billing.getBillingForWorkspace(auth.wid, auth.sub);
     res.json(data);
   })
 );

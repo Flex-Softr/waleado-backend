@@ -62,8 +62,199 @@ export async function expireAllDueSslCommerzWorkspaces(): Promise<number> {
   return result.count;
 }
 
-export async function getBillingForWorkspace(workspaceId: string) {
+export const TRIAL_DURATION_DAYS = 3;
+export const TRIAL_DURATION_MS = TRIAL_DURATION_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Ensures an account starts its 3-day free trial on first sign-in/use.
+ * Only once can an account receive the trial.
+ */
+export async function ensureTrialStarted(
+  userId?: string | null,
+  workspaceId?: string | null
+): Promise<{
+  isTrial: boolean;
+  isExpired: boolean;
+  daysRemaining: number;
+}> {
+  if (!workspaceId) {
+    return { isTrial: false, isExpired: false, daysRemaining: 0 };
+  }
+
+  const ws = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: {
+      id: true,
+      plan: true,
+      subscriptionStatus: true,
+      trialUsed: true,
+      trialStartedAt: true,
+      trialEndsAt: true,
+    },
+  });
+
+  if (!ws) {
+    return { isTrial: false, isExpired: false, daysRemaining: 0 };
+  }
+
+  // If already on a paid plan, trial is not active
+  if (ws.plan !== Plan.FREE) {
+    return { isTrial: false, isExpired: false, daysRemaining: 0 };
+  }
+
+  const now = new Date();
+
+  // If user provided, check if user has already consumed a trial
+  let userTrialUsed = false;
+  if (userId) {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { trialUsed: true },
+    });
+    if (u?.trialUsed) {
+      userTrialUsed = true;
+    }
+  }
+
+  // Case 1: Account has never used trial -> Start 3-day trial now!
+  if (!ws.trialUsed && !ws.trialStartedAt && !userTrialUsed) {
+    const trialStartedAt = now;
+    const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.workspace.update({
+        where: { id: workspaceId },
+        data: {
+          trialUsed: true,
+          trialStartedAt,
+          trialEndsAt,
+          subscriptionStatus: "trialing",
+        },
+      });
+
+      if (userId) {
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            trialUsed: true,
+            trialStartedAt,
+            trialEndsAt,
+          },
+        });
+      }
+    });
+
+    return { isTrial: true, isExpired: false, daysRemaining: TRIAL_DURATION_DAYS };
+  }
+
+  // Case 2: Workspace has an existing trial
+  if (ws.trialEndsAt) {
+    if (now > ws.trialEndsAt) {
+      if (ws.subscriptionStatus === "trialing") {
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { subscriptionStatus: "expired" },
+        });
+      }
+      return { isTrial: true, isExpired: true, daysRemaining: 0 };
+    } else {
+      const remainingMs = ws.trialEndsAt.getTime() - now.getTime();
+      const daysRemaining = Math.max(
+        1,
+        Math.ceil(remainingMs / (24 * 60 * 60 * 1000))
+      );
+      return { isTrial: true, isExpired: false, daysRemaining };
+    }
+  }
+
+  // Case 3: trialUsed is true, but dates missing or expired
+  return { isTrial: true, isExpired: true, daysRemaining: 0 };
+}
+
+/**
+ * Checks whether a workspace currently has active access (either via active paid subscription
+ * or via active 3-day trial). Platform admins always have access.
+ */
+export async function checkWorkspaceSubscriptionAccess(
+  workspaceId: string,
+  userId?: string | null
+): Promise<{
+  hasAccess: boolean;
+  isTrial: boolean;
+  isExpired: boolean;
+  daysRemaining?: number;
+  reason?: string;
+}> {
+  if (userId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (user?.role === "ADMIN") {
+      return { hasAccess: true, isTrial: false, isExpired: false };
+    }
+  }
+
   await enforceSslCommerzPeriodExpiry(workspaceId);
+
+  const ws = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: {
+      plan: true,
+      subscriptionStatus: true,
+      currentPeriodEnd: true,
+      lastPaymentGateway: true,
+      trialUsed: true,
+      trialStartedAt: true,
+      trialEndsAt: true,
+    },
+  });
+
+  if (!ws) {
+    return { hasAccess: false, isTrial: false, isExpired: false, reason: "NOT_FOUND" };
+  }
+
+  // Active paid subscription check
+  if (ws.plan !== Plan.FREE) {
+    const statusOk =
+      ws.subscriptionStatus && ACTIVE.has(ws.subscriptionStatus);
+    if (statusOk) {
+      return { hasAccess: true, isTrial: false, isExpired: false };
+    }
+    if (ws.subscriptionStatus === "demo") {
+      return { hasAccess: true, isTrial: false, isExpired: false };
+    }
+  }
+
+  // Free plan -> must be on active 3-day trial
+  const trial = await ensureTrialStarted(userId, workspaceId);
+  if (trial.isTrial && !trial.isExpired) {
+    return {
+      hasAccess: true,
+      isTrial: true,
+      isExpired: false,
+      daysRemaining: trial.daysRemaining,
+    };
+  }
+
+  return {
+    hasAccess: false,
+    isTrial: true,
+    isExpired: true,
+    daysRemaining: 0,
+    reason: "TRIAL_EXPIRED",
+  };
+}
+
+export async function getBillingForWorkspace(
+  workspaceId: string,
+  userId?: string | null
+) {
+  await enforceSslCommerzPeriodExpiry(workspaceId);
+
+  // Sync trial on billing fetch
+  await ensureTrialStarted(userId, workspaceId);
+
   const ws = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: {
@@ -73,20 +264,66 @@ export async function getBillingForWorkspace(workspaceId: string) {
       stripeCustomerId: true,
       stripeSubscriptionId: true,
       lastPaymentGateway: true,
+      trialUsed: true,
+      trialStartedAt: true,
+      trialEndsAt: true,
     },
   });
   if (!ws) {
     throw new AppError(404, "Workspace not found", "NOT_FOUND");
   }
+
+  const now = new Date();
+  const isPaid = ws.plan !== Plan.FREE;
+  const isTrial = !isPaid;
+  const isTrialExpired = Boolean(
+    isTrial &&
+      (ws.trialUsed || ws.trialEndsAt) &&
+      (!ws.trialEndsAt || now > ws.trialEndsAt)
+  );
+
+  let hasActiveSubscription = false;
+  if (isPaid) {
+    hasActiveSubscription = Boolean(
+      (ws.subscriptionStatus && ACTIVE.has(ws.subscriptionStatus)) ||
+        ws.subscriptionStatus === "demo"
+    );
+  } else {
+    hasActiveSubscription = Boolean(
+      ws.trialEndsAt && now <= ws.trialEndsAt
+    );
+  }
+
+  let daysRemaining: number | null = null;
+  if (isTrial && ws.trialEndsAt && now <= ws.trialEndsAt) {
+    daysRemaining = Math.max(
+      1,
+      Math.ceil((ws.trialEndsAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+    );
+  } else if (isPaid && ws.currentPeriodEnd && now <= ws.currentPeriodEnd) {
+    daysRemaining = Math.max(
+      0,
+      Math.ceil((ws.currentPeriodEnd.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
+    );
+  }
+
   const stripePortalEligible = Boolean(
     ws.stripeCustomerId &&
       ws.lastPaymentGateway === "stripe" &&
       ws.stripeSubscriptionId
   );
+
   return {
     planId: planToApi(ws.plan) as PlanIdApi,
     subscriptionStatus: ws.subscriptionStatus,
     currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
+    trialStartedAt: ws.trialStartedAt?.toISOString() ?? null,
+    trialEndsAt: ws.trialEndsAt?.toISOString() ?? null,
+    trialUsed: ws.trialUsed,
+    isTrial,
+    isTrialExpired,
+    hasActiveSubscription,
+    daysRemaining,
     stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
     stripePortalEligible,
     paymentGateways: listPaymentGateways(),
@@ -213,10 +450,11 @@ export async function resetWorkspaceToFree(workspaceId: string): Promise<void> {
     where: { id: workspaceId },
     data: {
       plan: Plan.FREE,
-      subscriptionStatus: null,
+      subscriptionStatus: "expired",
       stripeSubscriptionId: null,
       currentPeriodEnd: null,
       lastPaymentGateway: null,
+      trialUsed: true,
     },
   });
 }

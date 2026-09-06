@@ -13,6 +13,7 @@ import { validateAndFormatPhone } from "../lib/phone";
 import { env } from "../env";
 import { randomUUID } from "crypto";
 import { sendPasswordResetEmail } from "./mail.service";
+import { ensureTrialStarted, TRIAL_DURATION_MS } from "./billing.service";
 
 export type SafeUser = {
   id: string;
@@ -103,6 +104,8 @@ async function issueSession(
     },
   });
 
+  await ensureTrialStarted(user.id, primary.workspace.id);
+
   return {
     rawRefresh,
     response: {
@@ -145,6 +148,9 @@ export async function registerUser(input: {
     ? `${input.name}'s workspace`
     : "My workspace";
 
+  const now = new Date();
+  const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
+
   const user = await prisma.$transaction(async (tx) => {
     const u = await tx.user.create({
       data: {
@@ -152,12 +158,19 @@ export async function registerUser(input: {
         passwordHash,
         name: input.name?.trim() || null,
         phone: formattedPhone,
+        trialUsed: true,
+        trialStartedAt: now,
+        trialEndsAt,
       },
     });
     const ws = await tx.workspace.create({
       data: {
         name: workspaceName,
         slug,
+        trialUsed: true,
+        trialStartedAt: now,
+        trialEndsAt,
+        subscriptionStatus: "trialing",
       },
     });
     await tx.membership.create({
@@ -335,6 +348,9 @@ export async function signInOrRegisterGoogleUser(input: {
       ? `${input.name.trim()}'s workspace`
       : "My workspace";
 
+    const now = new Date();
+    const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
+
     user = await prisma.$transaction(async (tx) => {
       const u = await tx.user.create({
         data: {
@@ -342,12 +358,19 @@ export async function signInOrRegisterGoogleUser(input: {
           passwordHash: null,
           googleId: input.googleSub,
           name: input.name?.trim() || null,
+          trialUsed: true,
+          trialStartedAt: now,
+          trialEndsAt,
         },
       });
       const ws = await tx.workspace.create({
         data: {
           name: workspaceName,
           slug,
+          trialUsed: true,
+          trialStartedAt: now,
+          trialEndsAt,
+          subscriptionStatus: "trialing",
         },
       });
       await tx.membership.create({

@@ -175,6 +175,9 @@ model User {
    * When set, the user cannot sign in or refresh sessions.
    */
   blockedAt           DateTime?
+  trialUsed           Boolean              @default(false)
+  trialStartedAt      DateTime?
+  trialEndsAt         DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   refreshTokens       RefreshToken[]
@@ -221,6 +224,9 @@ model Workspace {
   lastPaymentGateway     String?
   subscriptionStatus     String?
   currentPeriodEnd       DateTime?
+  trialUsed              Boolean                 @default(false)
+  trialStartedAt         DateTime?
+  trialEndsAt            DateTime?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   memberships            Membership[]

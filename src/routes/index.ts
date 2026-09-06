@@ -22,6 +22,7 @@ import {
   aiCredentialsRouter,
 } from "./ai-credentials.routes";
 import { notificationsRouter } from "./notifications.routes";
+import { requireActiveSubscription } from "../middleware/require-active-subscription";
 
 const apiRouter = Router();
 
@@ -34,30 +35,30 @@ apiRouter.use("/auth", authRouter);
 
 // Administration and Integrations
 apiRouter.use("/admin", adminRouter);
-apiRouter.use("/api-credentials", apiCredentialsRouter);
+apiRouter.use("/api-credentials", requireActiveSubscription, apiCredentialsRouter);
 apiRouter.use("/open", openApiRouter);
 
 // Billing & Workspace
 apiRouter.use("/billing", billingRouter);
-apiRouter.use("/dashboard", dashboardRouter);
+apiRouter.use("/dashboard", requireActiveSubscription, dashboardRouter);
 
 // WhatsApp Messaging & Devices
-apiRouter.use("/devices", devicesRouter);
-apiRouter.use("/messages", messagesRouter);
-apiRouter.use("/templates", templatesRouter);
-apiRouter.use("/live-chat", liveChatRouter);
+apiRouter.use("/devices", requireActiveSubscription, devicesRouter);
+apiRouter.use("/messages", requireActiveSubscription, messagesRouter);
+apiRouter.use("/templates", requireActiveSubscription, templatesRouter);
+apiRouter.use("/live-chat", requireActiveSubscription, liveChatRouter);
 
 // Contacts & Campaigns
-apiRouter.use("/contacts", contactsRouter);
-apiRouter.use("/contact-groups", contactGroupsRouter);
-apiRouter.use("/bulk-campaigns", bulkCampaignsRouter);
-apiRouter.use("/group-grabber", groupGrabberRouter);
+apiRouter.use("/contacts", requireActiveSubscription, contactsRouter);
+apiRouter.use("/contact-groups", requireActiveSubscription, contactGroupsRouter);
+apiRouter.use("/bulk-campaigns", requireActiveSubscription, bulkCampaignsRouter);
+apiRouter.use("/group-grabber", requireActiveSubscription, groupGrabberRouter);
 
 // Automation & AI
-apiRouter.use("/auto-reply-rules", autoReplyRulesRouter);
-apiRouter.use("/call-responder-rules", callResponderRulesRouter);
-apiRouter.use("/chatbot-flows", chatbotFlowsRouter);
-apiRouter.use("/ai-credentials", aiCredentialsRouter);
-apiRouter.use("/ai", aiCatalogRouter);
+apiRouter.use("/auto-reply-rules", requireActiveSubscription, autoReplyRulesRouter);
+apiRouter.use("/call-responder-rules", requireActiveSubscription, callResponderRulesRouter);
+apiRouter.use("/chatbot-flows", requireActiveSubscription, chatbotFlowsRouter);
+apiRouter.use("/ai-credentials", requireActiveSubscription, aiCredentialsRouter);
+apiRouter.use("/ai", requireActiveSubscription, aiCatalogRouter);
 
 export { apiRouter };
