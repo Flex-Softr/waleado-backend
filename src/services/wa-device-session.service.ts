@@ -19,6 +19,7 @@ import {
 } from "./campaign_engagement.service";
 import { dispatchChatbotFlowForInbound } from "./chatbot_inbound.service";
 import { ingestInboundLiveChatMessages } from "./live_chat_inbound_ingest.service";
+import { dispatchCallResponderRulesForCall } from "./call_responder_rules.service";
 
 /** Repo root: `src/services` (or `dist/services`) → `../..` */
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -831,6 +832,20 @@ export async function ensureWaDeviceSession(
           console.error("[wa-session] campaign message receipt update error", err);
         }
       });
+
+      sock.ev.on("call", async (calls) => {
+        if (!calls?.length) return;
+        try {
+          await dispatchCallResponderRulesForCall(
+            deviceId,
+            workspaceId,
+            sock,
+            calls
+          );
+        } catch (err) {
+          console.error("[wa-session] call responder handler error", err);
+        }
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const ent = sessions.get(deviceId);
@@ -863,6 +878,7 @@ export async function stopWaDeviceSession(
       entry.sock.ev.removeAllListeners("messages.upsert");
       entry.sock.ev.removeAllListeners("messages.update");
       entry.sock.ev.removeAllListeners("message-receipt.update");
+      entry.sock.ev.removeAllListeners("call");
       entry.sock.end(undefined);
     } catch {
       /* ignore */

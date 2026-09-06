@@ -1,10 +1,50 @@
 import {
   CallResponderCallType,
   CallResponderMessageMode,
+  OutboundKind,
+  OutboundStatus,
 } from "@prisma/client";
+import type {
+  WACallEvent,
+  WACallUpdateType,
+  WASocket,
+  AnyMessageContent,
+} from "@whiskeysockets/baileys";
+import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { requireActiveTemplate } from "./templates.service";
+import { validateAndFormatPhone } from "../lib/phone";
+import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
+import {
+  withDeviceOutboundGate,
+  WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
+} from "../lib/wa-device-outbound-gate";
+import { env } from "../env";
+
+// Daily call counters per rule: ruleId -> { date: YYYY-MM-DD, count: number }
+const dailyCallsByRule = new Map<string, { date: string; count: number }>();
+
+function getTodayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getCallsTodayForRule(ruleId: string): number {
+  const today = getTodayStr();
+  const entry = dailyCallsByRule.get(ruleId);
+  if (!entry || entry.date !== today) return 0;
+  return entry.count;
+}
+
+function incrementCallsTodayForRule(ruleId: string): void {
+  const today = getTodayStr();
+  const entry = dailyCallsByRule.get(ruleId);
+  if (!entry || entry.date !== today) {
+    dailyCallsByRule.set(ruleId, { date: today, count: 1 });
+  } else {
+    entry.count += 1;
+  }
+}
 
 export type CallResponderCallTypeApi =
   | "received"
@@ -124,7 +164,7 @@ function toJson(row: {
     templateName: row.template?.name ?? null,
     active: row.active,
     responsesSent: row.responsesSent,
-    callsToday: 0,
+    callsToday: getCallsTodayForRule(row.id),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -302,4 +342,159 @@ export async function deleteCallResponderRule(
     throw new AppError(404, "Rule not found", "NOT_FOUND");
   }
   await prisma.callResponderRule.delete({ where: { id: ruleId } });
+}
+
+const processedCallKeys = new Map<string, number>();
+const PROCESSED_CALL_TTL_MS = 600_000; // 10 minutes
+
+function pruneProcessedCalls(now: number): void {
+  for (const [k, t] of processedCallKeys) {
+    if (now - t > PROCESSED_CALL_TTL_MS) processedCallKeys.delete(k);
+  }
+}
+
+function mapCallStatusToCallType(
+  status: WACallUpdateType
+): CallResponderCallType | null {
+  switch (status) {
+    case "timeout":
+      return CallResponderCallType.MISSED;
+    case "reject":
+      return CallResponderCallType.REJECTED;
+    case "accept":
+      return CallResponderCallType.RECEIVED;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Dispatches active Call Responder rules when incoming call events (timeout/missed, reject, accept)
+ * are received from Baileys WhatsApp socket.
+ */
+export async function dispatchCallResponderRulesForCall(
+  deviceId: string,
+  workspaceId: string,
+  sock: WASocket,
+  calls: WACallEvent[]
+): Promise<void> {
+  if (!env.WHATSAPP_BRIDGE_ENABLED || !calls?.length) return;
+
+  const now = Date.now();
+  pruneProcessedCalls(now);
+
+  for (const call of calls) {
+    // Ignore group calls or missing caller info
+    if (call.isGroup) continue;
+
+    const detectedType = mapCallStatusToCallType(call.status);
+    if (!detectedType) continue;
+
+    const rawFrom = call.from || call.chatId || call.callerPn;
+    if (!rawFrom || rawFrom.includes("@g.us")) continue;
+
+    const callerJid = jidNormalizedUser(rawFrom);
+    if (!callerJid) continue;
+
+    const callKey = `${deviceId}:${call.id}:${detectedType}`;
+    if (processedCallKeys.has(callKey)) continue;
+    processedCallKeys.set(callKey, now);
+
+    const rules = await prisma.callResponderRule.findMany({
+      where: {
+        workspaceId,
+        deviceId,
+        active: true,
+      },
+      include: {
+        template: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const matchingRule = rules.find((r) => r.callTypes.includes(detectedType));
+    if (!matchingRule) continue;
+
+    incrementCallsTodayForRule(matchingRule.id);
+
+    const rawDigits = (call.callerPn || callerJid)
+      .split("@")[0]
+      .replace(/\D/g, "");
+    const phoneParsed = validateAndFormatPhone("+" + rawDigits);
+    const toPhone = phoneParsed.valid ? phoneParsed.e164 : "+" + rawDigits;
+
+    const delayMs =
+      Math.max(0, matchingRule.responseDelayMinutes) * 60 * 1000;
+
+    const executeSend = async () => {
+      try {
+        let content: AnyMessageContent | null = null;
+        let textSummary = "";
+
+        if (
+          matchingRule.messageMode === CallResponderMessageMode.TEMPLATE &&
+          matchingRule.template
+        ) {
+          content = await buildTemplateWhatsAppContent(
+            workspaceId,
+            matchingRule.template
+          );
+          textSummary =
+            matchingRule.template.body ||
+            matchingRule.template.name ||
+            "(call responder template)";
+        } else if (
+          matchingRule.messageMode === CallResponderMessageMode.TEXT &&
+          matchingRule.messageBody
+        ) {
+          content = { text: matchingRule.messageBody };
+          textSummary = matchingRule.messageBody;
+        }
+
+        if (!content) return;
+
+        const waMsg = await withDeviceOutboundGate(
+          deviceId,
+          { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+          () => sock.sendMessage(callerJid, content as never)
+        );
+
+        await prisma.callResponderRule.update({
+          where: { id: matchingRule.id },
+          data: { responsesSent: { increment: 1 } },
+        });
+
+        await prisma.outboundMessage.create({
+          data: {
+            workspaceId,
+            deviceId,
+            toPhone,
+            kind:
+              matchingRule.messageMode === CallResponderMessageMode.TEMPLATE
+                ? OutboundKind.TEMPLATE
+                : OutboundKind.TEXT,
+            bodyText: textSummary,
+            templateId: matchingRule.templateId,
+            status: OutboundStatus.SENT,
+            providerRef: waMsg?.key?.id ?? null,
+          },
+        });
+
+        console.log(
+          `[call-responder] sent automated response to ${toPhone} for rule "${matchingRule.name}" (${detectedType})`
+        );
+      } catch (err) {
+        console.error(
+          `[call-responder] failed to send automated response for rule ${matchingRule.id}:`,
+          err
+        );
+      }
+    };
+
+    if (delayMs > 0) {
+      setTimeout(() => void executeSend(), delayMs).unref();
+    } else {
+      void executeSend();
+    }
+  }
 }
