@@ -15,6 +15,9 @@ export function getRefreshCookieName(): string {
 function cookieSecure(): boolean {
   if (process.env.COOKIE_SECURE === "true") return true;
   if (process.env.COOKIE_SECURE === "false") return false;
+  if (env.APP_PUBLIC_URL.startsWith("http://") && !env.APP_PUBLIC_URL.startsWith("https://")) {
+    return false;
+  }
   return env.NODE_ENV === "production";
 }
 
