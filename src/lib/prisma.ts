@@ -8,9 +8,11 @@ export const prisma =
   new PrismaClient({
     datasourceUrl: env.DATABASE_URL,
     log:
-      process.env.NODE_ENV === "development"
+      process.env.PRISMA_LOG_QUERIES === "true"
         ? ["query", "error", "warn"]
-        : ["error"],
+        : process.env.NODE_ENV === "development"
+          ? ["error", "warn"]
+          : ["error"],
   });
 
 if (process.env.NODE_ENV !== "production") {
