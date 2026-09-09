@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from "express";
 import { AppError } from "../lib/errors";
-import type { AuthedRequest } from "./auth";
+import { requireAuth, type AuthedRequest } from "./auth";
 
 /** Requires Bearer auth and platform UserRole ADMIN (JWT userRole claim). */
 export function requirePlatformAdmin(
@@ -9,10 +9,21 @@ export function requirePlatformAdmin(
   next: NextFunction
 ): void {
   if (!req.auth) {
-    next(new AppError(401, "Unauthorized", "UNAUTHORIZED"));
+    requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      proceedPlatformAdmin(req, res, next);
+    });
     return;
   }
-  if (req.auth.userRole !== "ADMIN") {
+  proceedPlatformAdmin(req, res, next);
+}
+
+function proceedPlatformAdmin(
+  req: AuthedRequest,
+  _res: Response,
+  next: NextFunction
+): void {
+  if (!req.auth || req.auth.userRole !== "ADMIN") {
     next(
       new AppError(
         403,

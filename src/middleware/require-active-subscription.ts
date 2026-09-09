@@ -1,6 +1,6 @@
 import type { NextFunction, Response } from "express";
 import { AppError } from "../lib/errors";
-import type { AuthedRequest } from "./auth";
+import { requireAuth, type AuthedRequest } from "./auth";
 import { checkWorkspaceSubscriptionAccess } from "../services/billing.service";
 
 /**
@@ -9,6 +9,21 @@ import { checkWorkspaceSubscriptionAccess } from "../services/billing.service";
  * Platform admins bypass this check.
  */
 export async function requireActiveSubscription(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  if (!req.auth) {
+    requireAuth(req, res, (err) => {
+      if (err) return next(err);
+      proceedSubscriptionCheck(req, res, next);
+    });
+    return;
+  }
+  proceedSubscriptionCheck(req, res, next);
+}
+
+async function proceedSubscriptionCheck(
   req: AuthedRequest,
   _res: Response,
   next: NextFunction

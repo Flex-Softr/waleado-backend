@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { AppError } from "../lib/errors";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
+import { requireActiveSubscription } from "../middleware/require-active-subscription";
 import * as liveChat from "../services/live_chat.service";
 import { getAssetFilePath } from "../services/template-media-assets.service";
 import { verifyLiveChatMediaToken } from "../services/live_chat_media_sign.service";
@@ -33,6 +34,7 @@ router.get(
 );
 
 router.use(requireAuth);
+router.use(requireActiveSubscription);
 
 function asyncHandler(
   fn: (req: AuthedRequest, res: import("express").Response) => Promise<void>

@@ -46,7 +46,7 @@ apiRouter.use("/dashboard", requireActiveSubscription, dashboardRouter);
 apiRouter.use("/devices", requireActiveSubscription, devicesRouter);
 apiRouter.use("/messages", requireActiveSubscription, messagesRouter);
 apiRouter.use("/templates", requireActiveSubscription, templatesRouter);
-apiRouter.use("/live-chat", requireActiveSubscription, liveChatRouter);
+apiRouter.use("/live-chat", liveChatRouter);
 
 // Contacts & Campaigns
 apiRouter.use("/contacts", requireActiveSubscription, contactsRouter);

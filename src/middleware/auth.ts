@@ -9,6 +9,10 @@ export function requireAuth(
   res: Response,
   next: NextFunction
 ): void {
+  if (req.auth) {
+    next();
+    return;
+  }
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
     next(new AppError(401, "Missing or invalid authorization header", "UNAUTHORIZED"));
