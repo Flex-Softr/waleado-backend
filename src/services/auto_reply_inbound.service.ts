@@ -24,7 +24,10 @@ import {
 } from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
 import { buildSystemPromptFromSkill } from "./ai_skills.service";
-import { normalizeOpenAiCompatibleBaseUrl } from "../config/ai-models";
+import {
+  normalizeOpenAiCompatibleBaseUrl,
+  DEPRECATED_GEMINI_MODEL_ALIASES,
+} from "../config/ai-models";
 import {
   buildAutoReplyMediaContent,
   buildTemplateWhatsAppContent,
@@ -346,7 +349,11 @@ async function buildAutoReplyPayload(
           cred.provider,
           cred.apiEndpoint
         );
-        const model = rule.aiSkill.model || cred.model || "gemini-1.5-flash";
+        const rawModel = rule.aiSkill.model || cred.model || "gemini-flash-latest";
+        const model =
+          cred.provider === "GEMINI" && DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
+            ? DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
+            : rawModel;
         resolved = {
           apiKey: cred.apiKey,
           model,

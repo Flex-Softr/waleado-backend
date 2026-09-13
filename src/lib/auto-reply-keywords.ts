@@ -121,6 +121,9 @@ export function matchAutoReplyTriggers(
   const byLength = [...tokens].sort((a, b) => b.length - a.length);
 
   for (const t of byLength) {
+    if (t === "*") {
+      return "*";
+    }
     const tLower = t.toLowerCase();
     switch (triggerType) {
       case "CONTAINS":

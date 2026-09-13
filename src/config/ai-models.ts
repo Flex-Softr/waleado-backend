@@ -28,23 +28,20 @@ export const AI_PROVIDERS: {
   },
 ];
 
+export const DEPRECATED_GEMINI_MODEL_ALIASES: Record<string, string> = {
+  "gemini-2.5-flash-lite": "gemini-flash-lite-latest",
+  "gemini-2.5-flash": "gemini-flash-latest",
+  "gemini-2.0-flash": "gemini-flash-latest",
+  "gemini-2.0-flash-lite": "gemini-flash-lite-latest",
+  "gemini-1.5-flash": "gemini-flash-latest",
+  "gemini-1.5-flash-8b": "gemini-flash-lite-latest",
+  "gemini-1.5-pro": "gemini-pro-latest",
+  "gemini-2.5-pro": "gemini-pro-latest",
+};
+
 /** Curated accepted models for UI selects (free + paid). */
 export const AI_MODEL_CATALOG: AiModelCatalogEntry[] = [
-  // Gemini — free-tier friendly (prefer 2.5; 2.0 often hits free-tier quota)
-  {
-    id: "gemini-2.5-flash-lite",
-    provider: "GEMINI",
-    label: "Gemini 2.5 Flash Lite",
-    tier: "free",
-    modelId: "gemini-2.5-flash-lite",
-  },
-  {
-    id: "gemini-2.5-flash",
-    provider: "GEMINI",
-    label: "Gemini 2.5 Flash",
-    tier: "free",
-    modelId: "gemini-2.5-flash",
-  },
+  // Gemini — free-tier friendly
   {
     id: "gemini-flash-latest",
     provider: "GEMINI",
@@ -53,25 +50,53 @@ export const AI_MODEL_CATALOG: AiModelCatalogEntry[] = [
     modelId: "gemini-flash-latest",
   },
   {
-    id: "gemini-2.0-flash",
+    id: "gemini-flash-lite-latest",
     provider: "GEMINI",
-    label: "Gemini 2.0 Flash",
+    label: "Gemini Flash Lite (latest)",
     tier: "free",
-    modelId: "gemini-2.0-flash",
+    modelId: "gemini-flash-lite-latest",
   },
   {
-    id: "gemini-2.0-flash-lite",
+    id: "gemini-3.5-flash",
     provider: "GEMINI",
-    label: "Gemini 2.0 Flash Lite",
+    label: "Gemini 3.5 Flash",
     tier: "free",
-    modelId: "gemini-2.0-flash-lite",
+    modelId: "gemini-3.5-flash",
   },
   {
-    id: "gemini-2.5-pro",
+    id: "gemini-3.5-flash-lite",
     provider: "GEMINI",
-    label: "Gemini 2.5 Pro",
+    label: "Gemini 3.5 Flash Lite",
+    tier: "free",
+    modelId: "gemini-3.5-flash-lite",
+  },
+  {
+    id: "gemini-3.6-flash",
+    provider: "GEMINI",
+    label: "Gemini 3.6 Flash",
+    tier: "free",
+    modelId: "gemini-3.6-flash",
+  },
+  {
+    id: "gemini-3.7-flash",
+    provider: "GEMINI",
+    label: "Gemini 3.7 Flash",
+    tier: "free",
+    modelId: "gemini-3.7-flash",
+  },
+  {
+    id: "gemini-pro-latest",
+    provider: "GEMINI",
+    label: "Gemini Pro (latest)",
     tier: "paid",
-    modelId: "gemini-2.5-pro",
+    modelId: "gemini-pro-latest",
+  },
+  {
+    id: "gemini-3.1-pro-preview",
+    provider: "GEMINI",
+    label: "Gemini 3.1 Pro Preview",
+    tier: "paid",
+    modelId: "gemini-3.1-pro-preview",
   },
   // OpenRouter — free
   {
@@ -193,8 +218,11 @@ export function resolveCatalogModelId(
   provider: AiProvider,
   modelOrCatalogId: string
 ): string | null {
-  const raw = modelOrCatalogId.trim();
+  let raw = modelOrCatalogId.trim();
   if (!raw) return null;
+  if (provider === "GEMINI" && DEPRECATED_GEMINI_MODEL_ALIASES[raw]) {
+    raw = DEPRECATED_GEMINI_MODEL_ALIASES[raw];
+  }
   const byId = AI_MODEL_CATALOG.find(
     (m) => m.provider === provider && m.id === raw
   );
@@ -203,5 +231,11 @@ export function resolveCatalogModelId(
     (m) => m.provider === provider && m.modelId === raw
   );
   if (byModelId) return byModelId.modelId;
+  if (
+    provider === "GEMINI" &&
+    (raw.startsWith("gemini-") || raw.startsWith("models/gemini-"))
+  ) {
+    return raw.replace(/^models\//, "");
+  }
   return null;
 }

@@ -71,7 +71,7 @@ export async function generateOpenAiReply(
     body.max_tokens = Math.min(4096, settings.maxTokens);
   }
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -82,6 +82,28 @@ export async function generateOpenAiReply(
     },
     body: JSON.stringify(body),
   });
+
+  if (
+    !res.ok &&
+    res.status === 404 &&
+    base.includes("googleapis.com") &&
+    body.model !== "gemini-flash-latest"
+  ) {
+    console.warn(
+      `[ai] Gemini model "${body.model}" returned 404; retrying with "gemini-flash-latest"`
+    );
+    body.model = "gemini-flash-latest";
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+        "HTTP-Referer": "https://leadwhats.app",
+        "X-Title": "LeadWhats",
+      },
+      body: JSON.stringify(body),
+    });
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
