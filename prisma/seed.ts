@@ -8,7 +8,7 @@
  */
 import path from "path";
 import { config } from "dotenv";
-import { PrismaClient, MembershipRole, UserRole } from "@prisma/client";
+import { PrismaClient, MembershipRole, UserRole, Plan } from "@prisma/client";
 
 import { hashPassword } from "../src/lib/password";
 import { normalizeDatabaseUrl } from "../src/lib/normalize-database-url";
@@ -102,9 +102,20 @@ async function main() {
       create: {
         name: workspaceName,
         slug,
+        plan: row.userRole === "ADMIN" ? Plan.BUSINESS : Plan.FREE,
+        subscriptionStatus: row.userRole === "ADMIN" ? "active" : undefined,
       },
       update: {
         name: workspaceName,
+        ...(row.userRole === "ADMIN"
+          ? {
+              plan: Plan.BUSINESS,
+              subscriptionStatus: "active",
+              trialUsed: false,
+              trialStartedAt: null,
+              trialEndsAt: null,
+            }
+          : {}),
       },
     });
 

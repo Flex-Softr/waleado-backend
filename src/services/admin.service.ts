@@ -271,6 +271,8 @@ export async function createAdminUser(input: {
       data: {
         name: workspaceName,
         slug,
+        plan: input.role === "ADMIN" ? Plan.BUSINESS : Plan.FREE,
+        subscriptionStatus: input.role === "ADMIN" ? "active" : undefined,
       },
     });
     await tx.membership.create({
@@ -569,12 +571,21 @@ export async function listAdminSubscriptions(input: {
   pageSize?: number;
   q?: string;
   plan?: PlanIdApi;
+  excludeAdmin?: boolean;
 }) {
   const page = clampPage(input.page ?? 1);
   const pageSize = clampPageSize(input.pageSize ?? PAGE_SIZE_DEFAULT);
   const q = input.q?.trim();
 
   const where: Prisma.WorkspaceWhereInput = {};
+  if (input.excludeAdmin) {
+    where.memberships = {
+      none: {
+        role: "OWNER",
+        user: { role: "ADMIN" },
+      },
+    };
+  }
   if (input.plan) {
     where.plan =
       input.plan === "free"
@@ -627,7 +638,7 @@ export async function listAdminSubscriptions(input: {
           take: 1,
           select: {
             user: {
-              select: { id: true, email: true, name: true, phone: true },
+              select: { id: true, email: true, name: true, phone: true, role: true },
             },
           },
         },
@@ -654,7 +665,13 @@ export async function listAdminSubscriptions(input: {
         createdAt: ws.createdAt.toISOString(),
         updatedAt: ws.updatedAt.toISOString(),
         owner: owner
-          ? { id: owner.id, email: owner.email, name: owner.name, phone: owner.phone ?? null }
+          ? {
+              id: owner.id,
+              email: owner.email,
+              name: owner.name,
+              phone: owner.phone ?? null,
+              role: owner.role,
+            }
           : null,
       };
     }),

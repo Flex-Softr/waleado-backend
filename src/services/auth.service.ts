@@ -104,7 +104,9 @@ async function issueSession(
     },
   });
 
-  await ensureTrialStarted(user.id, primary.workspace.id);
+  if (user.role !== "ADMIN") {
+    await ensureTrialStarted(user.id, primary.workspace.id);
+  }
 
   return {
     rawRefresh,

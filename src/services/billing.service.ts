@@ -97,6 +97,27 @@ export async function ensureTrialStarted(
     return { isTrial: false, isExpired: false, daysRemaining: 0 };
   }
 
+  // Platform admins never have a trial
+  if (userId) {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (u?.role === "ADMIN") {
+      return { isTrial: false, isExpired: false, daysRemaining: 0 };
+    }
+  }
+
+  const adminMember = await prisma.membership.findFirst({
+    where: {
+      workspaceId,
+      user: { role: "ADMIN" },
+    },
+  });
+  if (adminMember) {
+    return { isTrial: false, isExpired: false, daysRemaining: 0 };
+  }
+
   // If already on a paid plan, trial is not active
   if (ws.plan !== Plan.FREE) {
     return { isTrial: false, isExpired: false, daysRemaining: 0 };
@@ -195,6 +216,16 @@ export async function checkWorkspaceSubscriptionAccess(
     }
   }
 
+  const adminMember = await prisma.membership.findFirst({
+    where: {
+      workspaceId,
+      user: { role: "ADMIN" },
+    },
+  });
+  if (adminMember) {
+    return { hasAccess: true, isTrial: false, isExpired: false };
+  }
+
   await enforceSslCommerzPeriodExpiry(workspaceId);
 
   const ws = await prisma.workspace.findUnique({
@@ -250,9 +281,81 @@ export async function getBillingForWorkspace(
   workspaceId: string,
   userId?: string | null
 ) {
+  let isAdmin = false;
+  if (userId) {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (u?.role === "ADMIN") {
+      isAdmin = true;
+    }
+  }
+  if (!isAdmin) {
+    const adminMember = await prisma.membership.findFirst({
+      where: {
+        workspaceId,
+        user: { role: "ADMIN" },
+      },
+    });
+    if (adminMember) {
+      isAdmin = true;
+    }
+  }
+
+  if (isAdmin) {
+    // Clear any leftover trial or expired state on admin workspace
+    await prisma.workspace.updateMany({
+      where: {
+        id: workspaceId,
+        OR: [
+          { trialUsed: true },
+          { subscriptionStatus: { in: ["trialing", "expired"] } },
+        ],
+      },
+      data: {
+        trialUsed: false,
+        trialStartedAt: null,
+        trialEndsAt: null,
+        subscriptionStatus: "active",
+      },
+    });
+
+    const ws = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: {
+        plan: true,
+        subscriptionStatus: true,
+        currentPeriodEnd: true,
+        stripeCustomerId: true,
+        stripeSubscriptionId: true,
+        lastPaymentGateway: true,
+      },
+    });
+    if (!ws) {
+      throw new AppError(404, "Workspace not found", "NOT_FOUND");
+    }
+
+    return {
+      planId: (ws.plan !== Plan.FREE ? planToApi(ws.plan) : "business") as PlanIdApi,
+      subscriptionStatus: "active",
+      currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
+      trialStartedAt: null,
+      trialEndsAt: null,
+      trialUsed: false,
+      isTrial: false,
+      isTrialExpired: false,
+      hasActiveSubscription: true,
+      daysRemaining: null,
+      stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
+      stripePortalEligible: false,
+      paymentGateways: listPaymentGateways(),
+    };
+  }
+
   await enforceSslCommerzPeriodExpiry(workspaceId);
 
-  // Sync trial on billing fetch
+  // Sync trial on billing fetch for regular users
   await ensureTrialStarted(userId, workspaceId);
 
   const ws = await prisma.workspace.findUnique({

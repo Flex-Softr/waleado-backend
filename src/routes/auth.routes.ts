@@ -54,7 +54,7 @@ const registerSchema = z.object({
   email: z.string().email().max(255),
   password: z
     .string()
-    .min(10, "Password must be at least 10 characters")
+    .min(8, "Password must be at least 8 characters")
     .max(128),
   name: z.string().trim().max(120).optional(),
   phone: z.string().trim().max(30).optional().nullable(),
@@ -74,7 +74,7 @@ const resetPasswordSchema = z.object({
   token: z.string().min(20).max(256),
   password: z
     .string()
-    .min(10, "Password must be at least 10 characters")
+    .min(8, "Password must be at least 8 characters")
     .max(128),
 });
 
@@ -88,7 +88,7 @@ const changePasswordSchema = z.object({
   currentPassword: z.string().max(128).optional(),
   newPassword: z
     .string()
-    .min(10, "Password must be at least 10 characters")
+    .min(8, "Password must be at least 8 characters")
     .max(128),
 });
 

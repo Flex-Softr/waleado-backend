@@ -50,7 +50,7 @@ router.post(
     const body = z
       .object({
         email: z.string().email().max(320),
-        password: z.string().min(10).max(200),
+        password: z.string().min(8).max(200),
         name: z.string().trim().min(1).max(120).optional(),
         phone: z.string().trim().max(30).optional().nullable(),
         phoneNumber: z.string().trim().max(30).optional().nullable(),
@@ -165,6 +165,7 @@ router.get(
     const query = listQuery
       .extend({
         plan: z.enum(["free", "pro", "business"]).optional(),
+        excludeAdmin: z.coerce.boolean().optional(),
       })
       .parse(req.query);
     const result = await admin.listAdminSubscriptions(query);
