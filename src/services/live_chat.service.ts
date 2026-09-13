@@ -20,6 +20,7 @@ import {
   encodeLiveChatBodyText,
 } from "./live_chat_message_codec";
 import { createLiveChatMediaToken } from "./live_chat_media_sign.service";
+import { clearActiveAiSessionsForPhone } from "./auto_reply_inbound.service";
 
 export type LiveChatThreadJson = {
   id: string;
@@ -454,6 +455,8 @@ export async function sendLiveChatMessage(
       },
     });
 
+    clearActiveAiSessionsForPhone(workspaceId, thread.deviceId, thread.peerPhone);
+
     return {
       message: {
         id: created.id,
@@ -576,6 +579,7 @@ export async function sendLiveChatMessage(
       lastMessageAt: new Date(),
     },
   });
+  clearActiveAiSessionsForPhone(workspaceId, thread.deviceId, thread.peerPhone);
   return {
     message: {
       id: created.id,

@@ -41,6 +41,150 @@ import {
  */
 const cooldownUntilByKey = new Map<string, number>();
 
+export interface ActiveAiChatSession {
+  workspaceId: string;
+  deviceId: string;
+  remoteJid: string;
+  peerPhone: string | null;
+  ruleId: string;
+  startedAt: number;
+  lastActivityAt: number;
+  expiresAt: number;
+}
+
+/** Default duration for active continuous conversation window (15 minutes). */
+export const DEFAULT_AI_SESSION_TTL_MS = 15 * 60_000;
+const activeAiSessionsByKey = new Map<string, ActiveAiChatSession>();
+
+function aiSessionKey(workspaceId: string, deviceId: string, remoteJid: string): string {
+  return `${workspaceId}:${deviceId}:${remoteJid.toLowerCase()}`;
+}
+
+function pruneActiveAiSessions(now: number): void {
+  for (const [key, session] of activeAiSessionsByKey) {
+    if (now > session.expiresAt) {
+      activeAiSessionsByKey.delete(key);
+    }
+  }
+}
+
+export function getActiveAiSession(
+  workspaceId: string,
+  deviceId: string,
+  remoteJid: string
+): ActiveAiChatSession | null {
+  const now = Date.now();
+  pruneActiveAiSessions(now);
+  const key = aiSessionKey(workspaceId, deviceId, remoteJid);
+  const session = activeAiSessionsByKey.get(key);
+  if (!session) return null;
+  if (now > session.expiresAt) {
+    activeAiSessionsByKey.delete(key);
+    return null;
+  }
+  return session;
+}
+
+export function recordActiveAiSession(params: {
+  workspaceId: string;
+  deviceId: string;
+  remoteJid: string;
+  peerPhone: string | null;
+  ruleId: string;
+  startedAt?: number;
+  lastActivityAt?: number;
+  ttlMs?: number;
+}): void {
+  const now = params.lastActivityAt || Date.now();
+  const ttl = params.ttlMs ?? DEFAULT_AI_SESSION_TTL_MS;
+  const key = aiSessionKey(params.workspaceId, params.deviceId, params.remoteJid);
+  activeAiSessionsByKey.set(key, {
+    workspaceId: params.workspaceId,
+    deviceId: params.deviceId,
+    remoteJid: params.remoteJid,
+    peerPhone: params.peerPhone,
+    ruleId: params.ruleId,
+    startedAt: params.startedAt || now,
+    lastActivityAt: now,
+    expiresAt: now + ttl,
+  });
+}
+
+export function clearActiveAiSession(
+  workspaceId: string,
+  deviceId: string,
+  remoteJid: string
+): void {
+  const key = aiSessionKey(workspaceId, deviceId, remoteJid);
+  activeAiSessionsByKey.delete(key);
+}
+
+export function clearActiveAiSessionsForPhone(
+  workspaceId: string,
+  deviceId: string,
+  peerPhone: string
+): void {
+  const digits = peerPhone.replace(/\D+/g, "");
+  for (const [key, session] of activeAiSessionsByKey) {
+    if (session.workspaceId === workspaceId && session.deviceId === deviceId) {
+      if (session.peerPhone) {
+        const sDigits = session.peerPhone.replace(/\D+/g, "");
+        if (sDigits === digits) {
+          activeAiSessionsByKey.delete(key);
+          continue;
+        }
+      }
+      if (digits.length >= 6 && session.remoteJid.includes(digits)) {
+        activeAiSessionsByKey.delete(key);
+      }
+    }
+  }
+}
+
+const EXPLICIT_AI_STOP_KEYWORDS = new Set([
+  "stop",
+  "cancel",
+  "exit",
+  "quit",
+  "end chat",
+  "stop bot",
+  "stop ai",
+  "human",
+  "agent",
+  "live agent",
+  "human agent",
+  "talk to human",
+  "speak to human",
+  "speak to agent",
+  "representative",
+  "support agent",
+]);
+
+function isExplicitStopKeyword(text: string): boolean {
+  return EXPLICIT_AI_STOP_KEYWORDS.has(text.trim().toLowerCase());
+}
+
+/** Mutex per contact to sequence rapid-fire incoming messages */
+const peerLocks = new Map<string, Promise<void>>();
+
+async function withPeerLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const current = peerLocks.get(key) ?? Promise.resolve();
+  let release: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  peerLocks.set(key, current.then(() => next));
+  try {
+    await current;
+    return await fn();
+  } finally {
+    release!();
+    if (peerLocks.get(key) === next) {
+      peerLocks.delete(key);
+    }
+  }
+}
+
 /** Avoid double replies when Baileys emits the same message on `notify` and `append`. */
 const PROCESSED_TTL_MS = 120_000;
 const processedMessageKeys = new Map<string, number>();
@@ -567,54 +711,123 @@ export async function dispatchAutoRepliesForInbound(
     if (!text) continue;
 
     const participant = m.key.participant ?? "";
-
-    const selected = selectRuleToExecute(rules, text);
-    if (!selected) continue;
-
-    const { rule, matchedKeyword } = selected;
-
-    const cooldownKey = `${deviceId}:${rule.id}:${remoteJid}:${participant}:${matchedKeyword}`;
-    if (rule.cooldownMinutes > 0) {
-      const until = cooldownUntilByKey.get(cooldownKey) ?? 0;
-      if (now < until) continue;
-    }
-
     const peerPhone = phoneFromJid(remoteJid);
-    const result = await buildAutoReplyPayload(
-      workspaceId,
-      deviceId,
-      peerPhone,
-      rule,
-      text
-    );
-    if (!result) continue;
+    const lockKey = `${deviceId}:${remoteJid}`;
 
-    try {
-      await withDeviceOutboundGate(
+    await withPeerLock(lockKey, async () => {
+      // 1. Check for active AI continuous session
+      let activeSession = getActiveAiSession(workspaceId, deviceId, remoteJid);
+
+      // 2. Check if contact sent an explicit stop keyword
+      if (activeSession && isExplicitStopKeyword(text)) {
+        clearActiveAiSession(workspaceId, deviceId, remoteJid);
+        activeSession = null;
+      }
+
+      // 3. Find if any rule matches the incoming text by keywords
+      const keywordMatch = selectRuleToExecute(rules, text);
+
+      let selected: {
+        rule: AutoReplyRuleRow;
+        matchedKeyword: string;
+        isSessionFollowUp: boolean;
+      } | null = null;
+
+      if (keywordMatch) {
+        if (activeSession && activeSession.ruleId !== keywordMatch.rule.id) {
+          // If a different rule matched keywords with higher priority or specific command:
+          clearActiveAiSession(workspaceId, deviceId, remoteJid);
+        }
+        selected = {
+          rule: keywordMatch.rule,
+          matchedKeyword: keywordMatch.matchedKeyword,
+          isSessionFollowUp: false,
+        };
+      } else if (activeSession) {
+        // In an active session, follow-up messages continue the AI conversation
+        const sessionRule = rules.find(
+          (r) => r.id === activeSession.ruleId && r.active
+        );
+        const isContinuous = Boolean(
+          sessionRule?.aiSkill?.continuousChat ||
+            (sessionRule?.openAiSettings as Record<string, unknown> | null)
+              ?.continuousChat === true
+        );
+        if (sessionRule && isContinuous) {
+          selected = {
+            rule: sessionRule,
+            matchedKeyword: "continuous_session",
+            isSessionFollowUp: true,
+          };
+        } else {
+          clearActiveAiSession(workspaceId, deviceId, remoteJid);
+        }
+      }
+
+      if (!selected) return;
+
+      const { rule, matchedKeyword, isSessionFollowUp } = selected;
+
+      const cooldownKey = `${deviceId}:${rule.id}:${remoteJid}:${participant}:${matchedKeyword}`;
+      if (rule.cooldownMinutes > 0 && !isSessionFollowUp) {
+        const until = cooldownUntilByKey.get(cooldownKey) ?? 0;
+        if (now < until) return;
+      }
+
+      const result = await buildAutoReplyPayload(
+        workspaceId,
         deviceId,
-        { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
-        () => sock.sendMessage(remoteJid, result.payload)
+        peerPhone,
+        rule,
+        text
       );
-      if (peerPhone && result.textContent) {
-        await recordOutboundAutoReplyMessage(
-          workspaceId,
+      if (!result) return;
+
+      try {
+        await withDeviceOutboundGate(
           deviceId,
-          peerPhone,
-          result.textContent
+          { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+          () => sock.sendMessage(remoteJid, result.payload)
         );
-      }
-      if (rule.cooldownMinutes > 0) {
-        cooldownUntilByKey.set(
-          cooldownKey,
-          now + rule.cooldownMinutes * 60_000
+        if (peerPhone && result.textContent) {
+          await recordOutboundAutoReplyMessage(
+            workspaceId,
+            deviceId,
+            peerPhone,
+            result.textContent
+          );
+        }
+        if (rule.cooldownMinutes > 0 && !isSessionFollowUp) {
+          cooldownUntilByKey.set(
+            cooldownKey,
+            now + rule.cooldownMinutes * 60_000
+          );
+        }
+        await prisma.autoReplyRule.update({
+          where: { id: rule.id },
+          data: { responseCount: { increment: 1 } },
+        });
+
+        const isContinuousChatRule = Boolean(
+          rule.aiSkill?.continuousChat ||
+            (rule.openAiSettings as Record<string, unknown> | null)
+              ?.continuousChat === true
         );
+        if (isContinuousChatRule) {
+          recordActiveAiSession({
+            workspaceId,
+            deviceId,
+            remoteJid,
+            peerPhone,
+            ruleId: rule.id,
+            startedAt: activeSession?.startedAt ?? now,
+            lastActivityAt: now,
+            ttlMs: DEFAULT_AI_SESSION_TTL_MS,
+          });
+        }
+      } catch (e) {
+        console.error("[auto-reply] sendMessage failed", e);
       }
-      await prisma.autoReplyRule.update({
-        where: { id: rule.id },
-        data: { responseCount: { increment: 1 } },
-      });
-    } catch (e) {
-      console.error("[auto-reply] sendMessage failed", e);
-    }
+    });
   }
 }
