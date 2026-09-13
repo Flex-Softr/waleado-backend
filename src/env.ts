@@ -66,9 +66,16 @@ const envSchema = z.object({
   SSLCOMMERZ_STORE_ID: z.string().optional(),
   SSLCOMMERZ_STORE_PASSWORD: z.string().optional(),
   SSLCOMMERZ_SANDBOX: z.preprocess((v: unknown) => {
-    if (v === undefined || v === "" || v === null) return true;
-    const s = String(v).trim().toLowerCase();
-    return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    if (v !== undefined && v !== "" && v !== null) {
+      const s = String(v).trim().toLowerCase();
+      return s !== "false" && s !== "0" && s !== "no" && s !== "off";
+    }
+    const isLive = process.env.SSLCOMMERZ_IS_LIVE;
+    if (isLive !== undefined && isLive !== "" && isLive !== null) {
+      const s = String(isLive).trim().toLowerCase();
+      return !(s === "true" || s === "1" || s === "yes" || s === "on");
+    }
+    return true;
   }, z.boolean()),
   /** List prices for Pro/Business (interpreted as USD when CONVERSION_RATE_USD_TO_BDT is set; otherwise in SSLCOMMERZ_CURRENCY). */
   SSLCOMMERZ_PRO_AMOUNT: z.string().default("29.00"),
