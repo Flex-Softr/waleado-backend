@@ -1,4 +1,10 @@
-import type { AutoReplyRule, MessageTemplate } from "@prisma/client";
+import {
+  type AutoReplyRule,
+  type MessageTemplate,
+  type AiSkill,
+  type AiCredential,
+  LiveChatMessageDirection,
+} from "@prisma/client";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 import type { proto, WASocket, WAMessage } from "@whiskeysockets/baileys";
 import {
@@ -11,8 +17,14 @@ import {
   WA_DEVICE_INTERACTIVE_MIN_GAP_MS,
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
-import { generateOpenAiReply } from "./openai_auto_reply.service";
+import {
+  generateOpenAiReply,
+  type ChatHistoryMessage,
+  type OpenAiSettingsInput,
+} from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
+import { buildSystemPromptFromSkill } from "./ai_skills.service";
+import { normalizeOpenAiCompatibleBaseUrl } from "../config/ai-models";
 import {
   buildAutoReplyMediaContent,
   buildTemplateWhatsAppContent,
@@ -196,24 +208,197 @@ function replyBodyForRule(rule: {
   return rule.response.trim();
 }
 
+function phoneFromJid(jid: string): string | null {
+  const m = jid.match(/^(\d+)(?::\d+)?@/);
+  return m ? `+${m[1]}` : null;
+}
+
+async function loadChatHistory(
+  workspaceId: string,
+  deviceId: string,
+  peerPhone: string,
+  currentInboundText: string,
+  limit = 10
+): Promise<ChatHistoryMessage[]> {
+  try {
+    const thread = await prisma.liveChatThread.findUnique({
+      where: {
+        workspaceId_deviceId_peerPhone: {
+          workspaceId,
+          deviceId,
+          peerPhone,
+        },
+      },
+    });
+    if (!thread) return [];
+
+    const messages = await prisma.liveChatMessage.findMany({
+      where: { threadId: thread.id },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    messages.reverse();
+
+    const history: ChatHistoryMessage[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (
+        i === messages.length - 1 &&
+        msg.direction === LiveChatMessageDirection.INBOUND &&
+        msg.bodyText.trim() === currentInboundText.trim()
+      ) {
+        continue;
+      }
+      history.push({
+        role:
+          msg.direction === LiveChatMessageDirection.INBOUND
+            ? "user"
+            : "assistant",
+        content: msg.bodyText,
+      });
+    }
+    return history;
+  } catch (err) {
+    console.warn(
+      "[auto-reply] failed to load conversation history for continuous chat",
+      err
+    );
+    return [];
+  }
+}
+
+async function recordOutboundAutoReplyMessage(
+  workspaceId: string,
+  deviceId: string,
+  peerPhone: string,
+  replyText: string
+): Promise<void> {
+  if (!replyText.trim()) return;
+  try {
+    const thread = await prisma.liveChatThread.upsert({
+      where: {
+        workspaceId_deviceId_peerPhone: {
+          workspaceId,
+          deviceId,
+          peerPhone,
+        },
+      },
+      update: {
+        lastPreview: replyText.slice(0, 200),
+        lastMessageAt: new Date(),
+      },
+      create: {
+        workspaceId,
+        deviceId,
+        peerPhone,
+        lastPreview: replyText.slice(0, 200),
+        lastMessageAt: new Date(),
+      },
+    });
+
+    await prisma.liveChatMessage.create({
+      data: {
+        threadId: thread.id,
+        direction: LiveChatMessageDirection.OUTBOUND,
+        bodyText: replyText,
+      },
+    });
+  } catch (err) {
+    console.warn(
+      "[auto-reply] failed to record outbound auto-reply message",
+      err
+    );
+  }
+}
+
 type AutoReplyRuleRow = AutoReplyRule & {
   template: MessageTemplate | null;
+  aiSkill: (AiSkill & { aiCredential: AiCredential | null }) | null;
 };
 
 async function buildAutoReplyPayload(
   workspaceId: string,
+  deviceId: string,
+  peerPhone: string | null,
   rule: AutoReplyRuleRow,
   inboundText: string
-): Promise<AnyMessageContent | null> {
-  if (rule.openAiEnabled && rule.openAiSettings) {
-    const resolved = await resolveAiSettingsToOpenAiInput(
-      workspaceId,
-      rule.openAiSettings
-    );
+): Promise<{ payload: AnyMessageContent; textContent?: string } | null> {
+  if (rule.aiSkill || (rule.openAiEnabled && rule.openAiSettings)) {
+    let resolved: OpenAiSettingsInput | null = null;
+    let continuousChat = false;
+
+    if (rule.aiSkill) {
+      continuousChat = rule.aiSkill.continuousChat;
+      let cred = rule.aiSkill.aiCredential;
+      if (!cred && rule.openAiSettings) {
+        resolved = await resolveAiSettingsToOpenAiInput(
+          workspaceId,
+          rule.openAiSettings
+        );
+      }
+      if (!cred && !resolved) {
+        cred = await prisma.aiCredential.findFirst({
+          where: { workspaceId, active: true },
+        });
+      }
+      if (cred && !resolved) {
+        const baseUrl = normalizeOpenAiCompatibleBaseUrl(
+          cred.provider,
+          cred.apiEndpoint
+        );
+        const model = rule.aiSkill.model || cred.model || "gemini-1.5-flash";
+        resolved = {
+          apiKey: cred.apiKey,
+          model,
+          baseUrl,
+          temperature: rule.aiSkill.temperature,
+          maxTokens: rule.aiSkill.maxTokens,
+        };
+      }
+
+      if (resolved) {
+        const skillSystemPrompt = buildSystemPromptFromSkill(rule.aiSkill);
+        const extraPrompt = (
+          rule.openAiSettings as Record<string, unknown> | null
+        )?.systemPrompt;
+        resolved.systemPrompt =
+          typeof extraPrompt === "string" && extraPrompt.trim()
+            ? `${skillSystemPrompt}\n\n### ADDITIONAL RULE INSTRUCTIONS\n${extraPrompt.trim()}`
+            : skillSystemPrompt;
+        if (rule.aiSkill.temperature !== undefined) {
+          resolved.temperature = rule.aiSkill.temperature;
+        }
+        if (rule.aiSkill.maxTokens !== undefined) {
+          resolved.maxTokens = rule.aiSkill.maxTokens;
+        }
+      }
+    } else if (rule.openAiSettings) {
+      resolved = await resolveAiSettingsToOpenAiInput(
+        workspaceId,
+        rule.openAiSettings
+      );
+      continuousChat =
+        (rule.openAiSettings as Record<string, unknown> | null)
+          ?.continuousChat === true;
+    }
+
     if (resolved?.apiKey) {
       try {
-        const aiText = await generateOpenAiReply(resolved, inboundText);
-        return { text: aiText };
+        let history: ChatHistoryMessage[] | undefined;
+        if (continuousChat && peerPhone) {
+          history = await loadChatHistory(
+            workspaceId,
+            deviceId,
+            peerPhone,
+            inboundText
+          );
+        }
+        const aiText = await generateOpenAiReply(
+          resolved,
+          inboundText,
+          history
+        );
+        return { payload: { text: aiText }, textContent: aiText };
       } catch (e) {
         console.error(
           "[auto-reply] AI reply failed, using fallback",
@@ -230,18 +415,27 @@ async function buildAutoReplyPayload(
   const mode = rule.messageMode;
   if (mode === "TEMPLATE" && rule.template) {
     try {
-      return await buildTemplateWhatsAppContent(workspaceId, rule.template);
+      const payload = await buildTemplateWhatsAppContent(
+        workspaceId,
+        rule.template
+      );
+      const textContent = replyBodyForRule(rule);
+      return { payload, textContent };
     } catch (e) {
       console.error("[auto-reply] template send build failed", e);
     }
   }
   if (mode === "MEDIA" && rule.mediaAssetId) {
     try {
-      return await buildAutoReplyMediaContent(
+      const payload = await buildAutoReplyMediaContent(
         workspaceId,
         rule.mediaAssetId,
         rule.mediaCaption
       );
+      return {
+        payload,
+        textContent: rule.mediaCaption || "[Media Attachment]",
+      };
     } catch (e) {
       console.error("[auto-reply] media build failed", e);
     }
@@ -249,7 +443,7 @@ async function buildAutoReplyPayload(
 
   const txt = replyBodyForRule(rule);
   if (!txt) return null;
-  return { text: txt };
+  return { payload: { text: txt }, textContent: txt };
 }
 
 /** Rules must be sorted by priority asc then createdAt; first matching rule wins. */
@@ -335,6 +529,11 @@ export async function dispatchAutoRepliesForInbound(
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     include: {
       template: true,
+      aiSkill: {
+        include: {
+          aiCredential: true,
+        },
+      },
     },
   });
 
@@ -373,15 +572,30 @@ export async function dispatchAutoRepliesForInbound(
       if (now < until) continue;
     }
 
-    const payload = await buildAutoReplyPayload(workspaceId, rule, text);
-    if (!payload) continue;
+    const peerPhone = phoneFromJid(remoteJid);
+    const result = await buildAutoReplyPayload(
+      workspaceId,
+      deviceId,
+      peerPhone,
+      rule,
+      text
+    );
+    if (!result) continue;
 
     try {
       await withDeviceOutboundGate(
         deviceId,
         { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
-        () => sock.sendMessage(remoteJid, payload)
+        () => sock.sendMessage(remoteJid, result.payload)
       );
+      if (peerPhone && result.textContent) {
+        await recordOutboundAutoReplyMessage(
+          workspaceId,
+          deviceId,
+          peerPhone,
+          result.textContent
+        );
+      }
       if (rule.cooldownMinutes > 0) {
         cooldownUntilByKey.set(
           cooldownKey,

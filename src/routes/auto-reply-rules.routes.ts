@@ -52,6 +52,7 @@ const createBody = z.object({
   response: z.string().max(4096),
   openAiEnabled: z.boolean(),
   openAiSettings: openAiSettingsSchema.optional().nullable(),
+  aiSkillId: z.string().uuid().optional().nullable(),
   active: z.boolean(),
 });
 
@@ -71,6 +72,7 @@ const patchBody = z
     response: z.string().max(4096).optional(),
     openAiEnabled: z.boolean().optional(),
     openAiSettings: openAiSettingsSchema.optional().nullable(),
+    aiSkillId: z.string().uuid().optional().nullable(),
     active: z.boolean().optional(),
   })
   .refine((o) => Object.keys(o).length > 0, {

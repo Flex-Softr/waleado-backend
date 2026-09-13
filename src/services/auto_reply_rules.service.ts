@@ -45,6 +45,8 @@ export type AutoReplyRuleJson = {
   response: string;
   openAiEnabled: boolean;
   openAiSettings: Record<string, unknown> | null;
+  aiSkillId: string | null;
+  aiSkillName: string | null;
   active: boolean;
   responseCount: number;
   createdAt: string;
@@ -157,9 +159,10 @@ function assertContentRules(input: {
   mediaAssetId: string | null;
   response: string;
   openAiEnabled: boolean;
+  aiSkillId?: string | null;
 }): void {
   const hasText = input.response.trim().length > 0;
-  if (input.openAiEnabled) {
+  if (input.openAiEnabled || input.aiSkillId) {
     return;
   }
   if (input.messageMode === "template" && !input.templateId) {
@@ -192,12 +195,14 @@ function toJson(row: {
   response: string;
   openAiEnabled: boolean;
   openAiSettings: Prisma.JsonValue | null;
+  aiSkillId: string | null;
   active: boolean;
   responseCount: number;
   createdAt: Date;
   updatedAt: Date;
   device: { name: string; phone: string | null };
   template: { name: string } | null;
+  aiSkill?: { name: string } | null;
 }): AutoReplyRuleJson {
   return {
     id: row.id,
@@ -217,6 +222,8 @@ function toJson(row: {
     response: row.response,
     openAiEnabled: row.openAiEnabled,
     openAiSettings: sanitizeAiSettingsForResponse(row.openAiSettings),
+    aiSkillId: row.aiSkillId,
+    aiSkillName: row.aiSkill?.name ?? null,
     active: row.active,
     responseCount: row.responseCount,
     createdAt: row.createdAt.toISOString(),
@@ -227,6 +234,7 @@ function toJson(row: {
 const include = {
   device: { select: { name: true, phone: true } },
   template: { select: { name: true } },
+  aiSkill: { select: { name: true } },
 } as const;
 
 export async function listAutoReplyRules(
@@ -255,6 +263,7 @@ export type CreateAutoReplyRuleInput = {
   response: string;
   openAiEnabled: boolean;
   openAiSettings?: unknown;
+  aiSkillId?: string | null;
   active: boolean;
 };
 
@@ -286,6 +295,17 @@ export async function createAutoReplyRule(
     mediaAssetId = asset.id;
   }
 
+  let aiSkillId: string | null = null;
+  if (input.aiSkillId?.trim()) {
+    const skill = await prisma.aiSkill.findFirst({
+      where: { id: input.aiSkillId.trim(), workspaceId },
+    });
+    if (!skill) {
+      throw new AppError(404, "Selected AI skill not found", "NOT_FOUND");
+    }
+    aiSkillId = skill.id;
+  }
+
   const name = input.name.trim();
   const keyword = input.keyword.trim();
   const response = input.response.trim();
@@ -304,9 +324,10 @@ export async function createAutoReplyRule(
     mediaAssetId,
     response,
     openAiEnabled: input.openAiEnabled,
+    aiSkillId,
   });
 
-  if (input.openAiEnabled) {
+  if (input.openAiEnabled && !aiSkillId) {
     await assertValidAiSettings(workspaceId, input.openAiSettings, {
       allowLegacyApiKey: true,
     });
@@ -327,11 +348,12 @@ export async function createAutoReplyRule(
       mediaAssetId,
       mediaCaption,
       response: response.slice(0, 4096),
-      openAiEnabled: input.openAiEnabled,
+      openAiEnabled: aiSkillId ? true : input.openAiEnabled,
       openAiSettings:
         input.openAiSettings === undefined
           ? undefined
           : (input.openAiSettings as Prisma.InputJsonValue),
+      aiSkillId,
       active: input.active,
     },
     include,
@@ -392,6 +414,21 @@ export async function updateAutoReplyRule(
     }
   }
 
+  let aiSkillId: string | null | undefined = undefined;
+  if (input.aiSkillId !== undefined) {
+    if (input.aiSkillId === null || input.aiSkillId === "") {
+      aiSkillId = null;
+    } else {
+      const skill = await prisma.aiSkill.findFirst({
+        where: { id: input.aiSkillId.trim(), workspaceId },
+      });
+      if (!skill) {
+        throw new AppError(404, "Selected AI skill not found", "NOT_FOUND");
+      }
+      aiSkillId = skill.id;
+    }
+  }
+
   const data: Prisma.AutoReplyRuleUpdateInput = {
     device: { connect: { id: deviceId } },
   };
@@ -435,6 +472,15 @@ export async function updateAutoReplyRule(
         ? { disconnect: true }
         : { connect: { id: mediaAssetId } };
   }
+  if (aiSkillId !== undefined) {
+    data.aiSkill =
+      aiSkillId === null
+        ? { disconnect: true }
+        : { connect: { id: aiSkillId } };
+    if (aiSkillId !== null && input.openAiEnabled === undefined) {
+      data.openAiEnabled = true;
+    }
+  }
   if (input.mediaCaption !== undefined) {
     data.mediaCaption =
       input.mediaCaption === null || input.mediaCaption.trim() === ""
@@ -467,6 +513,8 @@ export async function updateAutoReplyRule(
       templateId !== undefined ? templateId : existing.templateId,
     mediaAssetId:
       mediaAssetId !== undefined ? mediaAssetId : existing.mediaAssetId,
+    aiSkillId:
+      aiSkillId !== undefined ? aiSkillId : existing.aiSkillId,
     response:
       input.response !== undefined
         ? input.response.trim()
@@ -474,7 +522,7 @@ export async function updateAutoReplyRule(
     openAiEnabled:
       input.openAiEnabled !== undefined
         ? input.openAiEnabled
-        : existing.openAiEnabled,
+        : (aiSkillId !== undefined && aiSkillId !== null ? true : existing.openAiEnabled),
   };
 
   assertContentRules({
@@ -483,9 +531,10 @@ export async function updateAutoReplyRule(
     mediaAssetId: merged.mediaAssetId,
     response: merged.response,
     openAiEnabled: merged.openAiEnabled,
+    aiSkillId: merged.aiSkillId,
   });
 
-  if (merged.openAiEnabled) {
+  if (merged.openAiEnabled && !merged.aiSkillId) {
     const settings =
       input.openAiSettings !== undefined
         ? input.openAiSettings

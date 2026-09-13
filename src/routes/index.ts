@@ -21,6 +21,7 @@ import {
   aiCatalogRouter,
   aiCredentialsRouter,
 } from "./ai-credentials.routes";
+import { aiSkillsRouter } from "./ai-skills.routes";
 import { notificationsRouter } from "./notifications.routes";
 import { requireActiveSubscription } from "../middleware/require-active-subscription";
 
@@ -59,6 +60,7 @@ apiRouter.use("/auto-reply-rules", requireActiveSubscription, autoReplyRulesRout
 apiRouter.use("/call-responder-rules", requireActiveSubscription, callResponderRulesRouter);
 apiRouter.use("/chatbot-flows", requireActiveSubscription, chatbotFlowsRouter);
 apiRouter.use("/ai-credentials", requireActiveSubscription, aiCredentialsRouter);
+apiRouter.use("/ai-skills", requireActiveSubscription, aiSkillsRouter);
 apiRouter.use("/ai", requireActiveSubscription, aiCatalogRouter);
 
 export { apiRouter };

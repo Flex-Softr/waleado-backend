@@ -7,12 +7,18 @@ export type OpenAiSettingsInput = {
   maxTokens?: number | null;
 };
 
+export type ChatHistoryMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
 /**
  * Chat completion against an OpenAI-compatible HTTP API.
  */
 export async function generateOpenAiReply(
   settings: OpenAiSettingsInput,
-  userMessage: string
+  userMessage: string,
+  history?: ChatHistoryMessage[]
 ): Promise<string> {
   const key = settings.apiKey.trim();
   if (!key) {
@@ -35,7 +41,22 @@ export async function generateOpenAiReply(
   if (sys) {
     messages.push({ role: "system", content: sys });
   }
-  messages.push({ role: "user", content: userMessage });
+
+  if (history && history.length > 0) {
+    for (const h of history) {
+      const content = h.content?.trim();
+      if (content) {
+        messages.push({ role: h.role, content });
+      }
+    }
+  }
+
+  const lastMsg = messages[messages.length - 1];
+  if (!lastMsg || lastMsg.role !== "user" || lastMsg.content !== userMessage.trim()) {
+    if (userMessage.trim()) {
+      messages.push({ role: "user", content: userMessage.trim() });
+    }
+  }
 
   const body: Record<string, unknown> = {
     model,

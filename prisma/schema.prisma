@@ -243,6 +243,7 @@ model Workspace {
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
   aiCredentials          AiCredential[]
+  aiSkills               AiSkill[]
   apiCredentials         ApiCredential[]
   notifications          Notification[]
 }
@@ -359,9 +360,57 @@ model AiCredential {
   active      Boolean    @default(true)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
+  aiSkills    AiSkill[]
 
   @@unique([workspaceId, name])
   @@index([workspaceId])
+}
+
+model AiSkill {
+  id                  String          @id @default(uuid())
+  workspaceId         String
+  workspace           Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name                String
+  description         String?         @db.Text
+  /**
+   * Describes the AI's role and persona (e.g., Customer Support Specialist).
+   */
+  rolePrompt          String          @db.Text
+  /**
+   * Describes what products/services the business provides.
+   */
+  servicesDescription String          @db.Text
+  /**
+   * Knowledge base about the business (hours, policies, FAQs, pricing, etc.).
+   */
+  businessKnowledge   String          @db.Text
+  /**
+   * Optional custom instructions, tone, boundaries, and rules.
+   */
+  customInstructions  String?         @db.Text
+  /**
+   * Optional associated AI credential.
+   */
+  aiCredentialId      String?
+  aiCredential        AiCredential?   @relation(fields: [aiCredentialId], references: [id], onDelete: SetNull)
+  /**
+   * Optional model override.
+   */
+  model               String?
+  temperature         Float           @default(0.7)
+  maxTokens           Int?            @default(1024)
+  /**
+   * When enabled, continuous multi-turn chat memory is maintained for customer conversations.
+   */
+  continuousChat      Boolean         @default(true)
+  active              Boolean         @default(true)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  autoReplyRules      AutoReplyRule[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@index([aiCredentialId])
 }
 
 model ChatbotFlowNode {
@@ -444,6 +493,8 @@ model AutoReplyRule {
    * Legacy: apiKey + model + baseUrl (+ same optionals).
    */
   openAiSettings  Json?
+  aiSkillId       String?
+  aiSkill         AiSkill?             @relation(fields: [aiSkillId], references: [id], onDelete: SetNull)
   active          Boolean              @default(true)
   responseCount   Int                  @default(0)
   createdAt       DateTime             @default(now())
@@ -452,6 +503,7 @@ model AutoReplyRule {
   @@index([workspaceId])
   @@index([deviceId])
   @@index([mediaAssetId])
+  @@index([aiSkillId])
 }
 
 model CallResponderRule {
