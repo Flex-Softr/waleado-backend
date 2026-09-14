@@ -186,7 +186,7 @@ async function withPeerLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 /** Avoid double replies when Baileys emits the same message on `notify` and `append`. */
-const PROCESSED_TTL_MS = 120_000;
+const PROCESSED_TTL_MS = 600_000;
 const processedMessageKeys = new Map<string, number>();
 
 function pruneProcessedMap(now: number): void {
@@ -208,10 +208,17 @@ function claimMessageForAutoReply(m: WAMessage, now: number): boolean {
   return true;
 }
 
-/** Baileys may set `messageTimestamp` as a number or a protobuf Long (`toNumber` / `low`). */
-function waMessageTimestampSeconds(ts: unknown): number | null {
+export const PROCESS_BOOT_TIME = Date.now();
+export const MAX_INBOUND_AUTO_REPLY_AGE_MS = 2 * 60 * 1000; // 2 minutes
+
+/** Baileys may set `messageTimestamp` as a number, bigint, or a protobuf Long (`toNumber` / `low`). */
+export function waMessageTimestampSeconds(ts: unknown): number | null {
   if (ts == null) return null;
   if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+  if (typeof ts === "bigint") {
+    const n = Number(ts);
+    return Number.isFinite(n) ? n : null;
+  }
   if (typeof ts === "object" && ts !== null) {
     const o = ts as { toNumber?: () => number; low?: number };
     if (typeof o.toNumber === "function") {
@@ -224,23 +231,50 @@ function waMessageTimestampSeconds(ts: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+export function waMessageTimestampMs(ts: unknown): number | null {
+  const raw = waMessageTimestampSeconds(ts);
+  if (raw == null || raw <= 0) return null;
+  const sec = raw > 1_000_000_000_000 ? Math.floor(raw / 1000) : raw;
+  return sec * 1000;
+}
+
 /**
- * `append` is used for offline / buffered delivery (`node.attrs.offline` in Baileys).
- * `notify` is always treated as live. For `append`, require a parseable timestamp and
- * a generous max age so delayed delivery still auto-replies.
+ * Validates whether an inbound message should trigger automated replies.
+ * Prevents automated AI replies on app startup or session reconnect by verifying:
+ * 1. Timestamp is valid.
+ * 2. Message is not older than MAX_INBOUND_AUTO_REPLY_AGE_MS (2 minutes).
+ * 3. Message was NOT sent before process startup (guards against replying to backlogs on restart).
+ * 4. Message was NOT sent before the device session connected.
  */
 function shouldProcessUpsertType(
   m: WAMessage,
-  upsertType: "notify" | "append"
+  upsertType: "notify" | "append",
+  sessionConnectedAt?: number | null
 ): boolean {
-  if (upsertType === "notify") return true;
-  const raw = waMessageTimestampSeconds(m.messageTimestamp);
-  if (raw == null || raw === 0) return false;
-  const sec = raw > 1_000_000_000_000 ? Math.floor(raw / 1000) : raw;
-  const msgMs = sec * 1000;
-  const ageMs = Date.now() - msgMs;
-  const maxAgeMs = 24 * 60 * 60 * 1000;
-  return ageMs >= -120_000 && ageMs <= maxAgeMs;
+  if (upsertType !== "notify" && upsertType !== "append") return false;
+
+  const msgMs = waMessageTimestampMs(m.messageTimestamp);
+  if (msgMs == null) return false;
+
+  const now = Date.now();
+  const ageMs = now - msgMs;
+
+  // Reject messages older than 2 minutes or more than 60s in the future (clock skew)
+  if (ageMs > MAX_INBOUND_AUTO_REPLY_AGE_MS || ageMs < -60_000) {
+    return false;
+  }
+
+  // Startup guard: Never process messages sent before this app instance started (with 5s skew buffer)
+  if (msgMs < PROCESS_BOOT_TIME - 5_000) {
+    return false;
+  }
+
+  // Session guard: Never process messages sent before this device session connected
+  if (sessionConnectedAt && msgMs < sessionConnectedAt - 5_000) {
+    return false;
+  }
+
+  return true;
 }
 
 /** Prefer @s.whatsapp.net JID when WhatsApp uses @lid for the primary remoteJid. */
@@ -414,7 +448,7 @@ async function loadChatHistory(
   }
 }
 
-async function recordOutboundAutoReplyMessage(
+export async function recordOutboundAutoReplyMessage(
   workspaceId: string,
   deviceId: string,
   peerPhone: string,
@@ -669,7 +703,8 @@ export async function dispatchAutoRepliesForInbound(
   ) => proto.IMessage | undefined,
   upsertType: MessageUpsertKind,
   /** Message keys already answered by chatbot (or another inbound handler). */
-  skipMessageKeys?: Set<string>
+  skipMessageKeys?: Set<string>,
+  sessionConnectedAt?: number | null
 ): Promise<void> {
   if (!env.WHATSAPP_BRIDGE_ENABLED || messages.length === 0) {
     return;
@@ -696,7 +731,7 @@ export async function dispatchAutoRepliesForInbound(
 
   for (const m of messages) {
     if (!m.message || m.key.fromMe) continue;
-    if (!shouldProcessUpsertType(m, upsertType)) continue;
+    if (!shouldProcessUpsertType(m, upsertType, sessionConnectedAt)) continue;
     const r = m.key.remoteJid;
     const id = m.key.id;
     if (r && id != null && id !== "" && skipMessageKeys?.has(`${r}|${m.key.participant ?? ""}|${String(id)}`)) {
@@ -712,6 +747,29 @@ export async function dispatchAutoRepliesForInbound(
 
     const participant = m.key.participant ?? "";
     const peerPhone = phoneFromJid(remoteJid);
+
+    // Database check: if an outbound reply was already sent in this thread at or after this message, skip
+    if (peerPhone) {
+      const msgMs = waMessageTimestampMs(m.messageTimestamp);
+      if (msgMs) {
+        const alreadyReplied = await prisma.liveChatMessage.findFirst({
+          where: {
+            thread: {
+              workspaceId,
+              deviceId,
+              peerPhone,
+            },
+            direction: LiveChatMessageDirection.OUTBOUND,
+            createdAt: { gte: new Date(msgMs - 5_000) },
+          },
+          select: { id: true },
+        });
+        if (alreadyReplied) {
+          continue;
+        }
+      }
+    }
+
     const lockKey = `${deviceId}:${remoteJid}`;
 
     await withPeerLock(lockKey, async () => {

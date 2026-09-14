@@ -33,6 +33,8 @@ type SessionEntry = {
   qr: string | null;
   connection: WaConnection;
   startError: string | null;
+  startedAt: number;
+  connectedAt: number | null;
 };
 
 const sessions = new Map<string, SessionEntry>();
@@ -550,6 +552,8 @@ export async function ensureWaDeviceSession(
       qr: null,
       connection: "connecting",
       startError: null,
+      startedAt: Date.now(),
+      connectedAt: null,
     });
 
     const dir = deviceSessionPath(workspaceId, deviceId);
@@ -650,6 +654,7 @@ export async function ensureWaDeviceSession(
         if (connection === "open") {
           ent.qr = null;
           ent.connection = "open";
+          ent.connectedAt = Date.now();
           clearPendingReconnect(deviceId);
           const phone = ownPhoneFromCreds(sock);
 
@@ -694,6 +699,7 @@ export async function ensureWaDeviceSession(
         if (connection === "close") {
           ent.qr = null;
           ent.connection = "close";
+          ent.connectedAt = null;
           try {
             sock.end(undefined);
           } catch {
@@ -786,6 +792,9 @@ export async function ensureWaDeviceSession(
         } catch (err) {
           console.error("[wa-session] live-chat ingest error", err);
         }
+        const ent = sessions.get(deviceId);
+        const sessionConnectedAt = ent?.connectedAt ?? ent?.startedAt ?? Date.now();
+
         // Chatbot takes priority; auto-reply skips messages the chatbot already answered.
         let chatbotHandled = new Set<string>();
         try {
@@ -795,7 +804,8 @@ export async function ensureWaDeviceSession(
             sock,
             messages,
             extractMessageContent,
-            type
+            type,
+            sessionConnectedAt
           );
         } catch (err) {
           console.error("[wa-session] chatbot handler error", err);
@@ -808,7 +818,8 @@ export async function ensureWaDeviceSession(
             messages,
             extractMessageContent,
             type,
-            chatbotHandled
+            chatbotHandled,
+            sessionConnectedAt
           );
         } catch (err) {
           console.error("[wa-session] auto-reply handler error", err);

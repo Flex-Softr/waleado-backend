@@ -1,4 +1,5 @@
 import type { ChatbotFlow, ChatbotFlowNode, Prisma } from "@prisma/client";
+import { LiveChatMessageDirection } from "@prisma/client";
 import type { proto, WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
 import { matchAutoReplyTriggers } from "../lib/auto-reply-keywords";
@@ -9,10 +10,16 @@ import {
 import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
 import { generateOpenAiReply } from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
+import {
+  PROCESS_BOOT_TIME,
+  MAX_INBOUND_AUTO_REPLY_AGE_MS,
+  waMessageTimestampMs,
+  recordOutboundAutoReplyMessage,
+} from "./auto_reply_inbound.service";
 
 type MessageUpsertKind = "notify" | "append";
 
-const PROCESSED_TTL_MS = 120_000;
+const PROCESSED_TTL_MS = 600_000;
 const processedInboundKeys = new Map<string, number>();
 const cooldownUntilByKey = new Map<string, number>();
 
@@ -38,33 +45,48 @@ function claimMessage(m: WAMessage, now: number): boolean {
   return true;
 }
 
-function waMessageTimestampSeconds(ts: unknown): number | null {
-  if (ts == null) return null;
-  if (typeof ts === "number" && Number.isFinite(ts)) return ts;
-  if (typeof ts === "object" && ts !== null) {
-    const o = ts as { toNumber?: () => number; low?: number };
-    if (typeof o.toNumber === "function") {
-      const n = o.toNumber();
-      return Number.isFinite(n) ? n : null;
-    }
-    if (typeof o.low === "number" && Number.isFinite(o.low)) return o.low;
-  }
-  const n = Number(ts);
-  return Number.isFinite(n) ? n : null;
+function phoneFromJid(jid: string): string | null {
+  const m = jid.match(/^(\d+)(?::\d+)?@/);
+  return m ? `+${m[1]}` : null;
 }
 
+/**
+ * Validates whether an inbound message should trigger a chatbot flow.
+ * Prevents automated replies on app startup or session reconnect by verifying:
+ * 1. Timestamp is valid.
+ * 2. Message is not older than MAX_INBOUND_AUTO_REPLY_AGE_MS (2 minutes).
+ * 3. Message was NOT sent before process startup (guards against replying to backlogs on restart).
+ * 4. Message was NOT sent before the device session connected.
+ */
 function shouldProcessUpsertType(
   m: WAMessage,
-  upsertType: MessageUpsertKind
+  upsertType: MessageUpsertKind,
+  sessionConnectedAt?: number | null
 ): boolean {
-  if (upsertType === "notify") return true;
-  const raw = waMessageTimestampSeconds(m.messageTimestamp);
-  if (raw == null || raw === 0) return false;
-  const sec = raw > 1_000_000_000_000 ? Math.floor(raw / 1000) : raw;
-  const msgMs = sec * 1000;
-  const ageMs = Date.now() - msgMs;
-  const maxAgeMs = 24 * 60 * 60 * 1000;
-  return ageMs >= -120_000 && ageMs <= maxAgeMs;
+  if (upsertType !== "notify" && upsertType !== "append") return false;
+
+  const msgMs = waMessageTimestampMs(m.messageTimestamp);
+  if (msgMs == null) return false;
+
+  const now = Date.now();
+  const ageMs = now - msgMs;
+
+  // Reject messages older than 2 minutes or more than 60s in the future
+  if (ageMs > MAX_INBOUND_AUTO_REPLY_AGE_MS || ageMs < -60_000) {
+    return false;
+  }
+
+  // Startup guard: Never process messages sent before this app instance started
+  if (msgMs < PROCESS_BOOT_TIME - 5_000) {
+    return false;
+  }
+
+  // Session guard: Never process messages sent before this device session connected
+  if (sessionConnectedAt && msgMs < sessionConnectedAt - 5_000) {
+    return false;
+  }
+
+  return true;
 }
 
 function destinationJid(m: WAMessage): string | null {
@@ -196,7 +218,8 @@ export async function dispatchChatbotFlowForInbound(
   extractMessageContent: (
     content: proto.IMessage | null | undefined
   ) => proto.IMessage | undefined,
-  upsertType: MessageUpsertKind
+  upsertType: MessageUpsertKind,
+  sessionConnectedAt?: number | null
 ): Promise<Set<string>> {
   const handled = new Set<string>();
   if (messages.length === 0) return handled;
@@ -215,12 +238,36 @@ export async function dispatchChatbotFlowForInbound(
   const now = Date.now();
   for (const m of messages) {
     if (!m.message || m.key.fromMe) continue;
-    if (!shouldProcessUpsertType(m, upsertType)) continue;
+    if (!shouldProcessUpsertType(m, upsertType, sessionConnectedAt)) continue;
     if (!claimMessage(m, now)) continue;
 
     const msgKey = inboundMessageKey(m);
     const remoteJid = destinationJid(m);
     if (!remoteJid) continue;
+
+    const peerPhone = phoneFromJid(remoteJid);
+    if (peerPhone) {
+      const msgMs = waMessageTimestampMs(m.messageTimestamp);
+      if (msgMs) {
+        const alreadyReplied = await prisma.liveChatMessage.findFirst({
+          where: {
+            thread: {
+              workspaceId,
+              deviceId,
+              peerPhone,
+            },
+            direction: LiveChatMessageDirection.OUTBOUND,
+            createdAt: { gte: new Date(msgMs - 5_000) },
+          },
+          select: { id: true },
+        });
+        if (alreadyReplied) {
+          if (msgKey) handled.add(msgKey);
+          continue;
+        }
+      }
+    }
+
     const inboundText = inboundTextFromMessage(m, extractMessageContent);
     if (!inboundText) continue;
     const selected = firstTriggeredFlow(flows, inboundText);
@@ -250,6 +297,14 @@ export async function dispatchChatbotFlowForInbound(
             () => sock.sendMessage(remoteJid, { text: aiText })
           );
           sentAny = true;
+          if (peerPhone) {
+            void recordOutboundAutoReplyMessage(
+              workspaceId,
+              deviceId,
+              peerPhone,
+              aiText
+            );
+          }
         }
       } catch (err) {
         console.error("[chatbot] AI reply failed, using message nodes", err);
@@ -268,6 +323,17 @@ export async function dispatchChatbotFlowForInbound(
             node
           );
           sentAny = sentAny || sent;
+          if (sent && peerPhone) {
+            const body = messageBodyFromNode(node);
+            if (body) {
+              void recordOutboundAutoReplyMessage(
+                workspaceId,
+                deviceId,
+                peerPhone,
+                body
+              );
+            }
+          }
         } catch (err) {
           console.error("[chatbot] message node send failed", err);
         }
