@@ -234,22 +234,36 @@ export async function ingestInboundLiveChatMessages(
       },
     });
 
-    const message = await prisma.liveChatMessage.create({
-      data: {
+    const existingMessage = await prisma.liveChatMessage.findFirst({
+      where: {
         threadId: thread.id,
         direction: LiveChatMessageDirection.INBOUND,
-        bodyText: storedBody,
         createdAt,
+        bodyText: storedBody,
       },
+      select: { id: true },
     });
 
-    await attributeInboundReplyToCampaign({
-      workspaceId,
-      deviceId,
-      peerPhone,
-      bodyText,
-      repliedAt: createdAt,
-      liveChatMessageId: message.id,
-    });
+    const message = existingMessage
+      ? existingMessage
+      : await prisma.liveChatMessage.create({
+          data: {
+            threadId: thread.id,
+            direction: LiveChatMessageDirection.INBOUND,
+            bodyText: storedBody,
+            createdAt,
+          },
+        });
+
+    if (!existingMessage) {
+      await attributeInboundReplyToCampaign({
+        workspaceId,
+        deviceId,
+        peerPhone,
+        bodyText,
+        repliedAt: createdAt,
+        liveChatMessageId: message.id,
+      });
+    }
   }
 }
