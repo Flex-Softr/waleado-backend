@@ -64,12 +64,13 @@ export function setGoogleOAuthCookies(
   state: string,
   nextPath?: string
 ): void {
-  clearGoogleOAuthCookies(res);
   const base = oauthCookieOpts();
   const maxAge = 10 * 60 * 1000;
   res.cookie(OAUTH_GOOGLE_STATE, state, { ...base, maxAge });
   if (nextPath) {
     res.cookie(OAUTH_GOOGLE_NEXT, nextPath, { ...base, maxAge });
+  } else {
+    res.clearCookie(OAUTH_GOOGLE_NEXT, base);
   }
 }
 

@@ -88,6 +88,7 @@ export async function exchangeGoogleAuthCode(
       name: payload.name ?? null,
     };
   } catch (err) {
+    console.error("[Google OAuth] exchangeGoogleAuthCode error:", err);
     if (err instanceof AppError) throw err;
     throw new AppError(
       502,

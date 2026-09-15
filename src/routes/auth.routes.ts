@@ -179,6 +179,12 @@ router.get(
       readGoogleOAuthCookies(req);
 
     if (!code || !state || !cookieState || state !== cookieState) {
+      console.warn("[Google OAuth] State validation failed or missing parameters:", {
+        hasCode: Boolean(code),
+        hasState: Boolean(state),
+        hasCookieState: Boolean(cookieState),
+        stateMatch: state === cookieState,
+      });
       redirectError("invalid_state");
       return;
     }
@@ -202,6 +208,7 @@ router.get(
       }
       res.redirect(302, `${frontendBase}/oauth/google/callback?${q}`);
     } catch (err) {
+      console.error("[Google OAuth] Callback processing failed:", err);
       const code =
         err instanceof AppError ? err.code ?? "oauth_failed" : "oauth_failed";
       redirectError(code);
