@@ -87,12 +87,12 @@ export async function generateOpenAiReply(
     !res.ok &&
     res.status === 404 &&
     base.includes("googleapis.com") &&
-    body.model !== "gemini-flash-latest"
+    body.model !== "gemini-1.5-flash"
   ) {
     console.warn(
-      `[ai] Gemini model "${body.model}" returned 404; retrying with "gemini-flash-latest"`
+      `[ai] Gemini model "${body.model}" returned 404; retrying with "gemini-1.5-flash"`
     );
-    body.model = "gemini-flash-latest";
+    body.model = "gemini-1.5-flash";
     res = await fetch(url, {
       method: "POST",
       headers: {
@@ -134,12 +134,17 @@ export async function generateOpenAiReply(
     throw new Error(`Model refused: ${refusal.slice(0, 200)}`);
   }
 
-  const text =
+  const rawText =
     extractMessageContent(message?.content) ||
     extractMessageContent(data.choices?.[0]?.text);
-  if (!text) {
+  if (!rawText) {
     throw new Error("OpenAI returned empty content");
   }
+
+  // Strip <think>...</think> blocks from reasoning models (e.g. DeepSeek R1)
+  const cleanedText = rawText.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const text = cleanedText || rawText;
+
   return text.slice(0, 4096);
 }
 

@@ -29,74 +29,68 @@ export const AI_PROVIDERS: {
 ];
 
 export const DEPRECATED_GEMINI_MODEL_ALIASES: Record<string, string> = {
-  "gemini-2.5-flash-lite": "gemini-flash-lite-latest",
-  "gemini-2.5-flash": "gemini-flash-latest",
-  "gemini-2.0-flash": "gemini-flash-latest",
-  "gemini-2.0-flash-lite": "gemini-flash-lite-latest",
-  "gemini-1.5-flash": "gemini-flash-latest",
-  "gemini-1.5-flash-8b": "gemini-flash-lite-latest",
-  "gemini-1.5-pro": "gemini-pro-latest",
-  "gemini-2.5-pro": "gemini-pro-latest",
+  "gemini-flash-latest": "gemini-1.5-flash",
+  "gemini-flash-lite-latest": "gemini-1.5-flash-8b",
+  "gemini-pro-latest": "gemini-1.5-pro",
+  "gemini-3.5-flash": "gemini-2.5-flash",
+  "gemini-3.5-flash-lite": "gemini-2.0-flash-lite",
+  "gemini-3.6-flash": "gemini-2.5-flash",
+  "gemini-3.7-flash": "gemini-2.5-flash",
+  "gemini-3.1-pro-preview": "gemini-2.5-pro",
 };
 
 /** Curated accepted models for UI selects (free + paid). */
 export const AI_MODEL_CATALOG: AiModelCatalogEntry[] = [
   // Gemini — free-tier friendly
   {
-    id: "gemini-flash-latest",
+    id: "gemini-2.5-flash",
     provider: "GEMINI",
-    label: "Gemini Flash (latest)",
+    label: "Gemini 2.5 Flash",
     tier: "free",
-    modelId: "gemini-flash-latest",
+    modelId: "gemini-2.5-flash",
   },
   {
-    id: "gemini-flash-lite-latest",
+    id: "gemini-2.0-flash",
     provider: "GEMINI",
-    label: "Gemini Flash Lite (latest)",
+    label: "Gemini 2.0 Flash",
     tier: "free",
-    modelId: "gemini-flash-lite-latest",
+    modelId: "gemini-2.0-flash",
   },
   {
-    id: "gemini-3.5-flash",
+    id: "gemini-2.0-flash-lite",
     provider: "GEMINI",
-    label: "Gemini 3.5 Flash",
+    label: "Gemini 2.0 Flash Lite",
     tier: "free",
-    modelId: "gemini-3.5-flash",
+    modelId: "gemini-2.0-flash-lite",
   },
   {
-    id: "gemini-3.5-flash-lite",
+    id: "gemini-1.5-flash",
     provider: "GEMINI",
-    label: "Gemini 3.5 Flash Lite",
+    label: "Gemini 1.5 Flash",
     tier: "free",
-    modelId: "gemini-3.5-flash-lite",
+    modelId: "gemini-1.5-flash",
   },
   {
-    id: "gemini-3.6-flash",
+    id: "gemini-1.5-flash-8b",
     provider: "GEMINI",
-    label: "Gemini 3.6 Flash",
+    label: "Gemini 1.5 Flash 8B",
     tier: "free",
-    modelId: "gemini-3.6-flash",
+    modelId: "gemini-1.5-flash-8b",
   },
+  // Gemini — paid / advanced
   {
-    id: "gemini-3.7-flash",
+    id: "gemini-2.5-pro",
     provider: "GEMINI",
-    label: "Gemini 3.7 Flash",
-    tier: "free",
-    modelId: "gemini-3.7-flash",
-  },
-  {
-    id: "gemini-pro-latest",
-    provider: "GEMINI",
-    label: "Gemini Pro (latest)",
+    label: "Gemini 2.5 Pro",
     tier: "paid",
-    modelId: "gemini-pro-latest",
+    modelId: "gemini-2.5-pro",
   },
   {
-    id: "gemini-3.1-pro-preview",
+    id: "gemini-1.5-pro",
     provider: "GEMINI",
-    label: "Gemini 3.1 Pro Preview",
+    label: "Gemini 1.5 Pro",
     tier: "paid",
-    modelId: "gemini-3.1-pro-preview",
+    modelId: "gemini-1.5-pro",
   },
   // OpenRouter — free
   {
@@ -143,11 +137,18 @@ export const AI_MODEL_CATALOG: AiModelCatalogEntry[] = [
     modelId: "openai/gpt-4o",
   },
   {
-    id: "openrouter-claude-sonnet",
+    id: "openrouter-claude-3-5-sonnet",
     provider: "OPENROUTER",
-    label: "Claude Sonnet 4",
+    label: "Claude 3.5 Sonnet",
     tier: "paid",
-    modelId: "anthropic/claude-sonnet-4",
+    modelId: "anthropic/claude-3.5-sonnet",
+  },
+  {
+    id: "openrouter-claude-3-7-sonnet",
+    provider: "OPENROUTER",
+    label: "Claude 3.7 Sonnet",
+    tier: "paid",
+    modelId: "anthropic/claude-3.7-sonnet",
   },
   {
     id: "openrouter-gemini-2.5-pro",
@@ -236,6 +237,9 @@ export function resolveCatalogModelId(
     (raw.startsWith("gemini-") || raw.startsWith("models/gemini-"))
   ) {
     return raw.replace(/^models\//, "");
+  }
+  if (provider === "OPENROUTER" && raw.length > 0) {
+    return raw;
   }
   return null;
 }
