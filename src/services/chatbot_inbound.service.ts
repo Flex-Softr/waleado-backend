@@ -61,7 +61,7 @@ function phoneFromJid(jid: string): string | null {
 function shouldProcessUpsertType(
   m: WAMessage,
   upsertType: MessageUpsertKind,
-  sessionConnectedAt?: number | null
+  _sessionConnectedAt?: number | null
 ): boolean {
   if (upsertType !== "notify" && upsertType !== "append") return false;
 
@@ -77,12 +77,7 @@ function shouldProcessUpsertType(
   }
 
   // Startup guard: Never process messages sent before this app instance started
-  if (msgMs < PROCESS_BOOT_TIME - 5_000) {
-    return false;
-  }
-
-  // Session guard: Never process messages sent before this device session connected
-  if (sessionConnectedAt && msgMs < sessionConnectedAt - 5_000) {
+  if (msgMs < PROCESS_BOOT_TIME - 10_000) {
     return false;
   }
 
@@ -102,13 +97,62 @@ function destinationJid(m: WAMessage): string | null {
 function textFromExtractedContent(inner: object | null | undefined): string {
   if (!inner || typeof inner !== "object") return "";
   const i = inner as Record<string, unknown>;
+
   if (typeof i.conversation === "string" && i.conversation.trim()) {
-    return i.conversation;
+    return i.conversation.trim();
   }
+
   const ext = i.extendedTextMessage as Record<string, unknown> | undefined;
   if (ext && typeof ext.text === "string" && ext.text.trim()) {
-    return ext.text;
+    return ext.text.trim();
   }
+
+  const btn = i.buttonsResponseMessage as Record<string, unknown> | undefined;
+  if (btn) {
+    const d = btn.selectedDisplayText;
+    if (typeof d === "string" && d.trim()) return d.trim();
+    const bid = btn.selectedButtonId;
+    if (typeof bid === "string" && bid.trim()) return bid.trim();
+  }
+
+  const tplBtn = i.templateButtonReplyMessage as Record<string, unknown> | undefined;
+  if (tplBtn) {
+    const d = tplBtn.selectedDisplayText;
+    if (typeof d === "string" && d.trim()) return d.trim();
+    const bid = tplBtn.selectedId;
+    if (typeof bid === "string" && bid.trim()) return bid.trim();
+  }
+
+  const list = i.listResponseMessage as Record<string, unknown> | undefined;
+  if (list) {
+    if (typeof list.title === "string" && list.title.trim()) return list.title.trim();
+    if (typeof list.description === "string" && list.description.trim()) {
+      return list.description.trim();
+    }
+    const sel = list.singleSelectReply as Record<string, unknown> | undefined;
+    const rowId = sel?.selectedRowId;
+    if (typeof rowId === "string" && rowId.trim()) return rowId.trim();
+  }
+
+  const inter = i.interactiveResponseMessage as Record<string, unknown> | undefined;
+  if (inter) {
+    const body = inter.body as Record<string, unknown> | undefined;
+    const bt = body?.text;
+    if (typeof bt === "string" && bt.trim()) return bt.trim();
+    const native = inter.nativeFlowResponseMessage as Record<string, unknown> | undefined;
+    if (native) {
+      if (typeof native.name === "string" && native.name.trim()) return native.name.trim();
+      if (typeof native.paramsJson === "string" && native.paramsJson.trim()) {
+        try {
+          const parsed = JSON.parse(native.paramsJson);
+          if (parsed && typeof parsed.id === "string") return parsed.id.trim();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   return "";
 }
 
@@ -246,27 +290,6 @@ export async function dispatchChatbotFlowForInbound(
     if (!remoteJid) continue;
 
     const peerPhone = phoneFromJid(remoteJid);
-    if (peerPhone) {
-      const msgMs = waMessageTimestampMs(m.messageTimestamp);
-      if (msgMs) {
-        const alreadyReplied = await prisma.liveChatMessage.findFirst({
-          where: {
-            thread: {
-              workspaceId,
-              deviceId,
-              peerPhone,
-            },
-            direction: LiveChatMessageDirection.OUTBOUND,
-            createdAt: { gte: new Date(msgMs - 5_000) },
-          },
-          select: { id: true },
-        });
-        if (alreadyReplied) {
-          if (msgKey) handled.add(msgKey);
-          continue;
-        }
-      }
-    }
 
     const inboundText = inboundTextFromMessage(m, extractMessageContent);
     if (!inboundText) continue;

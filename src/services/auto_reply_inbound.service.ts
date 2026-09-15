@@ -26,12 +26,14 @@ import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service"
 import { buildSystemPromptFromSkill } from "./ai_skills.service";
 import {
   normalizeOpenAiCompatibleBaseUrl,
+  resolveCatalogModelId,
   DEPRECATED_GEMINI_MODEL_ALIASES,
 } from "../config/ai-models";
 import {
   buildAutoReplyMediaContent,
   buildTemplateWhatsAppContent,
 } from "./wa-outbound-content";
+import { decodeLiveChatBodyText } from "./live_chat_message_codec";
 
 /**
  * Cooldown is per matched trigger phrase (not only per rule), so one rule with
@@ -249,7 +251,7 @@ export function waMessageTimestampMs(ts: unknown): number | null {
 function shouldProcessUpsertType(
   m: WAMessage,
   upsertType: "notify" | "append",
-  sessionConnectedAt?: number | null
+  _sessionConnectedAt?: number | null
 ): boolean {
   if (upsertType !== "notify" && upsertType !== "append") return false;
 
@@ -264,13 +266,8 @@ function shouldProcessUpsertType(
     return false;
   }
 
-  // Startup guard: Never process messages sent before this app instance started (with 5s skew buffer)
-  if (msgMs < PROCESS_BOOT_TIME - 5_000) {
-    return false;
-  }
-
-  // Session guard: Never process messages sent before this device session connected
-  if (sessionConnectedAt && msgMs < sessionConnectedAt - 5_000) {
+  // Startup guard: Never process messages sent before this app instance started
+  if (msgMs < PROCESS_BOOT_TIME - 10_000) {
     return false;
   }
 
@@ -297,38 +294,58 @@ function textFromExtractedContent(inner: object | null | undefined): string {
   const i = inner as Record<string, unknown>;
 
   if (typeof i.conversation === "string" && i.conversation.trim()) {
-    return i.conversation;
+    return i.conversation.trim();
   }
 
   const ext = i.extendedTextMessage as Record<string, unknown> | undefined;
   if (ext && typeof ext.text === "string" && ext.text.trim()) {
-    return ext.text;
+    return ext.text.trim();
   }
 
   const btn = i.buttonsResponseMessage as Record<string, unknown> | undefined;
   if (btn) {
     const d = btn.selectedDisplayText;
-    if (typeof d === "string" && d.trim()) return d;
+    if (typeof d === "string" && d.trim()) return d.trim();
     const bid = btn.selectedButtonId;
-    if (typeof bid === "string" && bid.trim()) return bid;
+    if (typeof bid === "string" && bid.trim()) return bid.trim();
+  }
+
+  const tplBtn = i.templateButtonReplyMessage as Record<string, unknown> | undefined;
+  if (tplBtn) {
+    const d = tplBtn.selectedDisplayText;
+    if (typeof d === "string" && d.trim()) return d.trim();
+    const bid = tplBtn.selectedId;
+    if (typeof bid === "string" && bid.trim()) return bid.trim();
   }
 
   const list = i.listResponseMessage as Record<string, unknown> | undefined;
   if (list) {
-    if (typeof list.title === "string" && list.title.trim()) return list.title;
+    if (typeof list.title === "string" && list.title.trim()) return list.title.trim();
     if (typeof list.description === "string" && list.description.trim()) {
-      return list.description;
+      return list.description.trim();
     }
     const sel = list.singleSelectReply as Record<string, unknown> | undefined;
     const rowId = sel?.selectedRowId;
-    if (typeof rowId === "string" && rowId.trim()) return rowId;
+    if (typeof rowId === "string" && rowId.trim()) return rowId.trim();
   }
 
   const inter = i.interactiveResponseMessage as Record<string, unknown> | undefined;
   if (inter) {
     const body = inter.body as Record<string, unknown> | undefined;
     const bt = body?.text;
-    if (typeof bt === "string" && bt.trim()) return bt;
+    if (typeof bt === "string" && bt.trim()) return bt.trim();
+    const native = inter.nativeFlowResponseMessage as Record<string, unknown> | undefined;
+    if (native) {
+      if (typeof native.name === "string" && native.name.trim()) return native.name.trim();
+      if (typeof native.paramsJson === "string" && native.paramsJson.trim()) {
+        try {
+          const parsed = JSON.parse(native.paramsJson);
+          if (parsed && typeof parsed.id === "string") return parsed.id.trim();
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
   for (const key of [
@@ -338,7 +355,7 @@ function textFromExtractedContent(inner: object | null | undefined): string {
   ] as const) {
     const media = i[key] as { caption?: string } | undefined;
     if (media?.caption && typeof media.caption === "string" && media.caption.trim()) {
-      return media.caption;
+      return media.caption.trim();
     }
   }
 
@@ -423,10 +440,14 @@ async function loadChatHistory(
     const history: ChatHistoryMessage[] = [];
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
+      const decoded = decodeLiveChatBodyText(msg.bodyText);
+      const cleanText = decoded.text.trim();
+      if (!cleanText) continue;
+
       if (
         i === messages.length - 1 &&
         msg.direction === LiveChatMessageDirection.INBOUND &&
-        msg.bodyText.trim() === currentInboundText.trim()
+        cleanText === currentInboundText.trim()
       ) {
         continue;
       }
@@ -435,7 +456,7 @@ async function loadChatHistory(
           msg.direction === LiveChatMessageDirection.INBOUND
             ? "user"
             : "assistant",
-        content: msg.bodyText,
+        content: cleanText,
       });
     }
     return history;
@@ -504,13 +525,15 @@ async function buildAutoReplyPayload(
   rule: AutoReplyRuleRow,
   inboundText: string
 ): Promise<{ payload: AnyMessageContent; textContent?: string } | null> {
-  if (rule.aiSkill || (rule.openAiEnabled && rule.openAiSettings)) {
+  if (rule.aiSkill || rule.openAiEnabled) {
     let resolved: OpenAiSettingsInput | null = null;
     let continuousChat = false;
 
     if (rule.aiSkill) {
       continuousChat = rule.aiSkill.continuousChat;
       let cred = rule.aiSkill.aiCredential;
+      if (cred && !cred.active) cred = null;
+
       if (!cred && rule.openAiSettings) {
         resolved = await resolveAiSettingsToOpenAiInput(
           workspaceId,
@@ -527,11 +550,12 @@ async function buildAutoReplyPayload(
           cred.provider,
           cred.apiEndpoint
         );
-        const rawModel = rule.aiSkill.model || cred.model || "gemini-flash-latest";
+        const rawModel = rule.aiSkill.model || cred.model || "gemini-1.5-flash";
         const model =
-          cred.provider === "GEMINI" && DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
+          resolveCatalogModelId(cred.provider, rawModel) ||
+          (cred.provider === "GEMINI" && DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
             ? DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
-            : rawModel;
+            : rawModel);
         resolved = {
           apiKey: cred.apiKey,
           model,
@@ -557,14 +581,37 @@ async function buildAutoReplyPayload(
           resolved.maxTokens = rule.aiSkill.maxTokens;
         }
       }
-    } else if (rule.openAiSettings) {
-      resolved = await resolveAiSettingsToOpenAiInput(
-        workspaceId,
-        rule.openAiSettings
-      );
-      continuousChat =
-        (rule.openAiSettings as Record<string, unknown> | null)
-          ?.continuousChat === true;
+    } else if (rule.openAiEnabled) {
+      if (rule.openAiSettings) {
+        resolved = await resolveAiSettingsToOpenAiInput(
+          workspaceId,
+          rule.openAiSettings
+        );
+        continuousChat =
+          (rule.openAiSettings as Record<string, unknown> | null)
+            ?.continuousChat === true;
+      }
+      if (!resolved) {
+        const defaultCred = await prisma.aiCredential.findFirst({
+          where: { workspaceId, active: true },
+        });
+        if (defaultCred) {
+          const baseUrl = normalizeOpenAiCompatibleBaseUrl(
+            defaultCred.provider,
+            defaultCred.apiEndpoint
+          );
+          const rawModel = defaultCred.model || "gemini-1.5-flash";
+          const model =
+            resolveCatalogModelId(defaultCred.provider, rawModel) || rawModel;
+          resolved = {
+            apiKey: defaultCred.apiKey,
+            model,
+            baseUrl,
+            temperature: 0.7,
+            maxTokens: 1024,
+          };
+        }
+      }
     }
 
     if (resolved?.apiKey) {
@@ -747,28 +794,6 @@ export async function dispatchAutoRepliesForInbound(
 
     const participant = m.key.participant ?? "";
     const peerPhone = phoneFromJid(remoteJid);
-
-    // Database check: if an outbound reply was already sent in this thread at or after this message, skip
-    if (peerPhone) {
-      const msgMs = waMessageTimestampMs(m.messageTimestamp);
-      if (msgMs) {
-        const alreadyReplied = await prisma.liveChatMessage.findFirst({
-          where: {
-            thread: {
-              workspaceId,
-              deviceId,
-              peerPhone,
-            },
-            direction: LiveChatMessageDirection.OUTBOUND,
-            createdAt: { gte: new Date(msgMs - 5_000) },
-          },
-          select: { id: true },
-        });
-        if (alreadyReplied) {
-          continue;
-        }
-      }
-    }
 
     const lockKey = `${deviceId}:${remoteJid}`;
 
