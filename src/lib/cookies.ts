@@ -1,15 +1,21 @@
 import type { CookieOptions, Response } from "express";
 import { env } from "../env";
 
-const REFRESH_COOKIE = "fw_refresh";
+const REFRESH_COOKIE = "waleado_refresh";
+const LEGACY_REFRESH_COOKIE = "fw_refresh";
 /** Cookie scoped to auth routes only — not sent to other API paths. */
 const REFRESH_PATH = "/v1/auth";
 
-const OAUTH_GOOGLE_STATE = "fw_oauth_google_state";
-const OAUTH_GOOGLE_NEXT = "fw_oauth_google_next";
+const OAUTH_GOOGLE_STATE = "waleado_oauth_google_state";
+const OAUTH_GOOGLE_NEXT = "waleado_oauth_google_next";
 
 export function getRefreshCookieName(): string {
   return REFRESH_COOKIE;
+}
+
+export function readRefreshCookie(req: { cookies: Record<string, unknown> }): string | undefined {
+  const token = req.cookies[REFRESH_COOKIE] ?? req.cookies[LEGACY_REFRESH_COOKIE];
+  return typeof token === "string" ? token : undefined;
 }
 
 function cookieSecure(): boolean {
@@ -22,10 +28,11 @@ function cookieSecure(): boolean {
 }
 
 function sameSite(): CookieOptions["sameSite"] {
-  const s = env.COOKIE_SAME_SITE;
-  if (s === "none") return "none";
-  if (s === "strict") return "strict";
-  return "lax";
+  const envVal = process.env.COOKIE_SAME_SITE || env.COOKIE_SAME_SITE;
+  if (envVal === "none") return "none";
+  if (envVal === "strict") return "strict";
+  if (envVal === "lax") return "lax";
+  return cookieSecure() ? "none" : "lax";
 }
 
 export function setRefreshCookie(res: Response, rawToken: string): void {
@@ -41,6 +48,12 @@ export function setRefreshCookie(res: Response, rawToken: string): void {
 
 export function clearRefreshCookie(res: Response): void {
   res.clearCookie(REFRESH_COOKIE, {
+    httpOnly: true,
+    secure: cookieSecure(),
+    sameSite: sameSite(),
+    path: REFRESH_PATH,
+  });
+  res.clearCookie(LEGACY_REFRESH_COOKIE, {
     httpOnly: true,
     secure: cookieSecure(),
     sameSite: sameSite(),

@@ -19,6 +19,7 @@ import {
   setRefreshCookie,
   clearRefreshCookie,
   getRefreshCookieName,
+  readRefreshCookie,
   setGoogleOAuthCookies,
   readGoogleOAuthCookies,
   clearGoogleOAuthCookies,
@@ -105,7 +106,7 @@ router.post(
   authLimiter,
   asyncHandler(async (req, res) => {
     const body = registerSchema.parse(req.body);
-    const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+    const prior = readRefreshCookie(req);
     if (prior) {
       await logoutSession(prior);
     }
@@ -138,7 +139,7 @@ router.get(
       return;
     }
 
-    const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+    const prior = readRefreshCookie(req);
     if (prior) {
       await logoutSession(prior);
     }
@@ -191,7 +192,7 @@ router.get(
 
     try {
       const claims = await exchangeGoogleAuthCode(code);
-      const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+      const prior = readRefreshCookie(req);
       if (prior) {
         await logoutSession(prior);
       }
@@ -221,7 +222,7 @@ router.post(
   strictAuthLimiter,
   asyncHandler(async (req, res) => {
     const body = loginSchema.parse(req.body);
-    const prior = req.cookies[getRefreshCookieName()] as string | undefined;
+    const prior = readRefreshCookie(req);
     if (prior) {
       await logoutSession(prior);
     }
@@ -256,7 +257,7 @@ router.post(
   "/refresh",
   authLimiter,
   asyncHandler(async (req, res) => {
-    const raw = req.cookies[getRefreshCookieName()] as string | undefined;
+    const raw = readRefreshCookie(req);
     const { response, rawRefresh } = await refreshSession(raw);
     setRefreshCookie(res, rawRefresh);
     res.json({
@@ -270,7 +271,7 @@ router.post(
 router.post(
   "/logout",
   asyncHandler(async (req, res) => {
-    const raw = req.cookies[getRefreshCookieName()] as string | undefined;
+    const raw = readRefreshCookie(req);
     await logoutSession(raw);
     clearRefreshCookie(res);
     res.status(204).send();

@@ -36,7 +36,7 @@ async function browserReturnHandler(
   try {
     const q = mergeBrowserReturnParams(req);
     const { redirect } = await handleSslCommerzBrowserReturn(q);
-    res.redirect(302, redirect);
+    res.redirect(303, redirect);
   } catch (e) {
     next(e);
   }
