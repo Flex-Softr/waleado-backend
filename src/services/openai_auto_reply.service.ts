@@ -77,8 +77,8 @@ export async function generateOpenAiReply(
       "Content-Type": "application/json",
       Authorization: `Bearer ${key}`,
       // OpenRouter recommends these; harmless for Gemini / other OpenAI-compat APIs.
-      "HTTP-Referer": "https://leadwhats.app",
-      "X-Title": "LeadWhats",
+      "HTTP-Referer": "https://waleado.com",
+      "X-Title": "Waleado",
     },
     body: JSON.stringify(body),
   });
@@ -98,8 +98,8 @@ export async function generateOpenAiReply(
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
-        "HTTP-Referer": "https://leadwhats.app",
-        "X-Title": "LeadWhats",
+        "HTTP-Referer": "https://waleado.com",
+        "X-Title": "Waleado",
       },
       body: JSON.stringify(body),
     });

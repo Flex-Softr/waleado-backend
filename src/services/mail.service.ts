@@ -10,9 +10,9 @@ export async function sendPasswordResetEmail(input: {
   resetUrl: string;
   expiresMinutes: number;
 }): Promise<{ delivered: boolean }> {
-  const subject = "Reset your FlexoWhats password";
+  const subject = "Reset your Waleado password";
   const text = [
-    "We received a request to reset your FlexoWhats password.",
+    "We received a request to reset your Waleado password.",
     "",
     `Open this link within ${input.expiresMinutes} minutes:`,
     input.resetUrl,
@@ -20,7 +20,7 @@ export async function sendPasswordResetEmail(input: {
     "If you did not request this, you can ignore this email.",
   ].join("\n");
   const html = `
-    <p>We received a request to reset your FlexoWhats password.</p>
+    <p>We received a request to reset your Waleado password.</p>
     <p><a href="${escapeHtml(input.resetUrl)}">Reset your password</a></p>
     <p>This link expires in ${input.expiresMinutes} minutes.</p>
     <p>If you did not request this, you can ignore this email.</p>

@@ -56,7 +56,7 @@ export function errorHandler(
       error: {
         code: "DATABASE_UNAVAILABLE",
         message:
-          "PostgreSQL is not reachable. Start a server on the host/port in DATABASE_URL (e.g. from the repo root: docker compose up -d), create the database if needed, run prisma migrate, and ensure DATABASE_URL in `.env` or `.env.local` matches (compose default: postgres/postgres@localhost:5432/flexowhats).",
+          "PostgreSQL is not reachable. Start a server on the host/port in DATABASE_URL (e.g. from the repo root: docker compose up -d), create the database if needed, run prisma migrate, and ensure DATABASE_URL in `.env` or `.env.local` matches (compose default: postgres/postgres@localhost:5432/waleado).",
       },
     });
     return;

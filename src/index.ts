@@ -59,7 +59,7 @@ async function bootstrap() {
   await ensureTrialColumnsExist();
 
   server = app.listen(port, () => {
-    console.log(`FlexoWhats API listening on http://localhost:${port}`);
+    console.log(`Waleado API listening on http://localhost:${port}`);
     console.log(
       `[whatsapp] bridge ${env.WHATSAPP_BRIDGE_ENABLED ? "ENABLED (real QR + send)" : "DISABLED (outbound simulated)"}`
     );

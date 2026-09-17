@@ -73,7 +73,7 @@ export async function initiateSslCommerzCheckout(
     cancel_url: cancelUrl,
     ipn_url: ipnUrl,
     product_category: "non-physical-goods",
-    product_name: `FlexoWhats ${input.planId} plan`,
+    product_name: `Waleado ${input.planId} plan`,
     cus_name: cusName,
     cus_email: cusEmail,
     cus_phone: phone.slice(0, 20),
@@ -84,7 +84,7 @@ export async function initiateSslCommerzCheckout(
     cus_postcode: "1000",
     value_a: input.workspaceId,
     value_b: input.planId,
-    value_c: "flexowhats",
+    value_c: "waleado",
     value_d: tranId,
   };
 

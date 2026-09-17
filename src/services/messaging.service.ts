@@ -197,7 +197,7 @@ export async function sendSingleMessage(
       try {
         const fetchRes = await fetch(url, {
           signal: AbortSignal.timeout(25000),
-          headers: { "User-Agent": "LeadWhatsApp-API/1.0" },
+          headers: { "User-Agent": "Waleado-API/1.0" },
         });
         if (!fetchRes.ok) {
           throw new Error(`HTTP ${fetchRes.status} ${fetchRes.statusText}`);

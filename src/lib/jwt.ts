@@ -25,16 +25,16 @@ export function signAccessToken(payload: Omit<AccessPayload, "jti"> & { jti?: st
   };
   const options: SignOptions = {
     expiresIn: env.JWT_ACCESS_EXPIRES_IN as SignOptions["expiresIn"],
-    issuer: "flexowhats-api",
-    audience: "flexowhats-app",
+    issuer: "waleado-api",
+    audience: "waleado-app",
   };
   return jwt.sign(body, env.JWT_ACCESS_SECRET, options);
 }
 
 export function verifyAccessToken(token: string): AccessPayload {
   const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {
-    issuer: "flexowhats-api",
-    audience: "flexowhats-app",
+    issuer: "waleado-api",
+    audience: "waleado-app",
   });
   if (typeof decoded === "string" || !decoded.sub) {
     throw new Error("Invalid token payload");

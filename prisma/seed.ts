@@ -42,21 +42,21 @@ const SEED_USERS: {
   userRole: UserRole;
 }[] = [
   {
-    email: "owner@seed.flexowhats.local",
+    email: "owner@seed.waleado.local",
     name: "Seed Owner",
     phone: "+15551234567",
     membershipRole: "OWNER",
     userRole: "CUSTOMER",
   },
   {
-    email: "admin@seed.flexowhats.local",
+    email: "admin@seed.waleado.local",
     name: "Seed Admin",
     phone: "+15559876543",
     membershipRole: "OWNER",
     userRole: "ADMIN",
   },
   {
-    email: "member@seed.flexowhats.local",
+    email: "member@seed.waleado.local",
     name: "Seed Member",
     phone: "+15553334444",
     membershipRole: "OWNER",

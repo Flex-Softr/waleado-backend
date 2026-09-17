@@ -139,7 +139,7 @@ const envSchema = z.object({
     .transform((v) => v === "true"),
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
-  SMTP_FROM: z.string().default("FlexoWhats <no-reply@localhost>"),
+  SMTP_FROM: z.string().default("Waleado <no-reply@localhost>"),
 });
 
 export type Env = z.infer<typeof envSchema>;

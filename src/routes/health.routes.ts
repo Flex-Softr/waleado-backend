@@ -4,7 +4,7 @@ import { prisma } from "../lib/prisma";
 const router = Router();
 
 router.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "flexowhats-api" });
+  res.json({ ok: true, service: "waleado-api" });
 });
 
 router.get("/ready", async (_req, res) => {
