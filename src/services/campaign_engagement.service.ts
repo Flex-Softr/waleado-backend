@@ -11,10 +11,26 @@ function statusNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function receiptDateFromSeconds(value: unknown): Date {
-  return typeof value === "number" && Number.isFinite(value)
-    ? new Date(value * 1000)
-    : new Date();
+function parseReceiptDate(value: unknown): Date {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const sec = value > 1_000_000_000_000 ? Math.floor(value / 1000) : value;
+    return new Date(sec * 1000);
+  }
+  if (typeof value === "object" && value !== null) {
+    const o = value as { toNumber?: () => number; low?: number };
+    if (typeof o.toNumber === "function") {
+      const n = o.toNumber();
+      if (Number.isFinite(n)) {
+        const sec = n > 1_000_000_000_000 ? Math.floor(n / 1000) : n;
+        return new Date(sec * 1000);
+      }
+    } else if (typeof o.low === "number" && Number.isFinite(o.low)) {
+      const n = o.low;
+      const sec = n > 1_000_000_000_000 ? Math.floor(n / 1000) : n;
+      return new Date(sec * 1000);
+    }
+  }
+  return new Date();
 }
 
 async function updateRecipientReceiptByMessageId(input: {
@@ -28,7 +44,10 @@ async function updateRecipientReceiptByMessageId(input: {
     where: {
       workspaceId: input.workspaceId,
       deviceId: input.deviceId,
-      providerRef: { endsWith: `:${input.messageId}` },
+      OR: [
+        { providerRef: input.messageId },
+        { providerRef: { endsWith: `:${input.messageId}` } },
+      ],
       bulkRecipient: { isNot: null },
     },
     select: {
@@ -80,18 +99,18 @@ export async function recordCampaignMessageReceiptUpdates(
     const id = item.key.id;
     if (!id) continue;
     const receipt = item.receipt as {
-      receiptTimestamp?: number | null;
-      readTimestamp?: number | null;
+      receiptTimestamp?: unknown;
+      readTimestamp?: unknown;
     };
     await updateRecipientReceiptByMessageId({
       workspaceId,
       deviceId,
       messageId: id,
-      deliveredAt: receipt.receiptTimestamp
-        ? receiptDateFromSeconds(receipt.receiptTimestamp)
+      deliveredAt: receipt?.receiptTimestamp
+        ? parseReceiptDate(receipt.receiptTimestamp)
         : undefined,
-      seenAt: receipt.readTimestamp
-        ? receiptDateFromSeconds(receipt.readTimestamp)
+      seenAt: receipt?.readTimestamp
+        ? parseReceiptDate(receipt.readTimestamp)
         : undefined,
     });
   }
@@ -108,10 +127,17 @@ export async function attributeInboundReplyToCampaign(input: {
   const since = new Date(
     input.repliedAt.getTime() - ATTRIBUTION_WINDOW_DAYS * 24 * 60 * 60 * 1000
   );
+  const rawClean = input.peerPhone.replace(/^\+/, "").trim();
+  const phoneVariants = [
+    input.peerPhone.trim(),
+    rawClean,
+    `+${rawClean}`,
+  ].filter(Boolean);
+
   const recipient = await prisma.bulkCampaignRecipient.findFirst({
     where: {
       workspaceId: input.workspaceId,
-      phone: input.peerPhone,
+      phone: { in: phoneVariants },
       deviceId: input.deviceId,
       status: {
         in: [
@@ -122,7 +148,7 @@ export async function attributeInboundReplyToCampaign(input: {
       sentAt: { gte: since, lte: input.repliedAt },
     },
     orderBy: [{ sentAt: "desc" }, { updatedAt: "desc" }],
-    select: { id: true },
+    select: { id: true, deliveredAt: true, seenAt: true },
   });
   if (!recipient) return;
 
@@ -133,6 +159,9 @@ export async function attributeInboundReplyToCampaign(input: {
       lastReplyAt: input.repliedAt,
       lastReplyText: input.bodyText.slice(0, 1000),
       lastReplyMessageId: input.liveChatMessageId,
+      // If a recipient replied, they evidently received and saw the message
+      ...(!recipient.deliveredAt ? { deliveredAt: input.repliedAt } : {}),
+      ...(!recipient.seenAt ? { seenAt: input.repliedAt } : {}),
     },
   });
 }

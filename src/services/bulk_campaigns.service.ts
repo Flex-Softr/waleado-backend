@@ -279,6 +279,17 @@ export type BulkCampaignRecipientAudienceApi =
   | "no_reply"
   | "seen_no_reply";
 
+export type BulkCampaignDailyStatJson = {
+  date: string;
+  sent: number;
+  delivered: number;
+  seen: number;
+  replied: number;
+  failed: number;
+  seenRate: number;
+  replyRate: number;
+};
+
 export type BulkCampaignDetailJson = {
   campaign: BulkCampaignListItemJson;
   template: { id: string; name: string; typeId: string } | null;
@@ -288,6 +299,7 @@ export type BulkCampaignDetailJson = {
   devices: BulkCampaignDeviceRowJson[];
   deviceSendStats: BulkCampaignDeviceSendStatsJson[];
   stats: BulkCampaignOutboundStatsJson;
+  dateWiseStats: BulkCampaignDailyStatJson[];
   recentMessages: BulkCampaignRecentMessageJson[];
   recentRecipients: BulkCampaignRecipientJson[];
 };
@@ -586,6 +598,26 @@ export async function getBulkCampaignDetail(
     seenCount,
   };
 
+  const allRecipientsForDaily = await prisma.bulkCampaignRecipient.findMany({
+    where: { campaignId, workspaceId },
+    select: {
+      sentAt: true,
+      deliveredAt: true,
+      seenAt: true,
+      repliedAt: true,
+      lastReplyAt: true,
+      failedAt: true,
+      createdAt: true,
+      status: true,
+    },
+  });
+
+  const dateWiseStats = computeDateWiseStats({
+    recipients: allRecipientsForDaily,
+    timezone: campaign.timezone,
+    campaignCreatedAt: campaign.createdAt,
+  });
+
   return {
     campaign: toListItem({
       id: campaign.id,
@@ -637,6 +669,7 @@ export async function getBulkCampaignDetail(
     devices,
     deviceSendStats,
     stats,
+    dateWiseStats,
     recentMessages,
     recentRecipients,
   };
@@ -645,11 +678,12 @@ export async function getBulkCampaignDetail(
 export async function exportBulkCampaignReport(
   workspaceId: string,
   campaignId: string,
-  format: "csv" | "xlsx"
+  format: "csv" | "xlsx",
+  type: "recipients" | "daily" = "recipients"
 ): Promise<BulkCampaignReportResult> {
   const campaign = await prisma.bulkCampaign.findFirst({
     where: { id: campaignId, workspaceId },
-    select: { id: true, name: true },
+    select: { id: true, name: true, timezone: true, createdAt: true },
   });
   if (!campaign) {
     throw new AppError(404, "Campaign not found", "NOT_FOUND");
@@ -707,16 +741,67 @@ export async function exportBulkCampaignReport(
             r.status === OutboundStatus.FAILED ? r.createdAt.toISOString() : "",
         }));
 
-  const filename = `${slugifyFilename(campaign.name)}-report.${format}`;
+  const dailyStats = computeDateWiseStats({
+    recipients,
+    timezone: campaign.timezone,
+    campaignCreatedAt: campaign.createdAt,
+  });
+
+  const dailyRecords = dailyStats.map((d) => ({
+    Date: d.date,
+    Sent: d.sent,
+    Delivered: d.delivered,
+    Seen: d.seen,
+    "Seen Rate (%)": `${d.seenRate}%`,
+    Responded: d.replied,
+    "Response Rate (%)": `${d.replyRate}%`,
+    Failed: d.failed,
+  }));
+
   if (format === "csv") {
+    if (type === "daily") {
+      const filename = `${slugifyFilename(campaign.name)}-daily-report.csv`;
+      const dailyHeaders = [
+        "Date",
+        "Sent",
+        "Delivered",
+        "Seen",
+        "Seen Rate (%)",
+        "Responded",
+        "Response Rate (%)",
+        "Failed",
+      ];
+      return {
+        filename,
+        contentType: "text/csv; charset=utf-8",
+        body: Buffer.from(recordsToCsv(dailyRecords, dailyHeaders), "utf8"),
+      };
+    }
+
+    const filename = `${slugifyFilename(campaign.name)}-report.csv`;
+    const recipientHeaders = [
+      "Phone",
+      "Status",
+      "Device",
+      "Attempts",
+      "Error",
+      "QueuedAt",
+      "SentAt",
+      "DeliveredAt",
+      "SeenAt",
+      "RepliedAt",
+      "LastReply",
+      "FailedAt",
+    ];
     return {
       filename,
       contentType: "text/csv; charset=utf-8",
-      body: Buffer.from(recordsToCsv(records), "utf8"),
+      body: Buffer.from(recordsToCsv(records, recipientHeaders), "utf8"),
     };
   }
 
-  const worksheet = XLSX.utils.json_to_sheet(records, {
+  const workbook = XLSX.utils.book_new();
+  const recipientSheet = XLSX.utils.json_to_sheet(records, {
     header: [
       "Phone",
       "Status",
@@ -732,8 +817,28 @@ export async function exportBulkCampaignReport(
       "FailedAt",
     ],
   });
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Bulk Report");
+  const dailySheet = XLSX.utils.json_to_sheet(dailyRecords, {
+    header: [
+      "Date",
+      "Sent",
+      "Delivered",
+      "Seen",
+      "Seen Rate (%)",
+      "Responded",
+      "Response Rate (%)",
+      "Failed",
+    ],
+  });
+
+  if (type === "daily") {
+    XLSX.utils.book_append_sheet(workbook, dailySheet, "Daily Performance");
+    XLSX.utils.book_append_sheet(workbook, recipientSheet, "Recipient Details");
+  } else {
+    XLSX.utils.book_append_sheet(workbook, recipientSheet, "Recipient Details");
+    XLSX.utils.book_append_sheet(workbook, dailySheet, "Daily Performance");
+  }
+
+  const filename = `${slugifyFilename(campaign.name)}-report.xlsx`;
   return {
     filename,
     contentType:
@@ -977,8 +1082,117 @@ function slugifyFilename(value: string): string {
   );
 }
 
-function recordsToCsv(records: Record<string, string | number>[]): string {
-  const headers = [
+function formatDateKey(date: Date, timezone?: string | null): string {
+  try {
+    if (timezone) {
+      const formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      return formatter.format(date);
+    }
+  } catch {
+    // fallback if invalid timezone
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function computeDateWiseStats(input: {
+  recipients: Array<{
+    sentAt: Date | null;
+    deliveredAt: Date | null;
+    seenAt: Date | null;
+    repliedAt: Date | null;
+    lastReplyAt: Date | null;
+    failedAt: Date | null;
+    createdAt: Date;
+    status?: BulkCampaignRecipientStatus;
+  }>;
+  timezone?: string | null;
+  campaignCreatedAt?: Date;
+}): BulkCampaignDailyStatJson[] {
+  const dailyMap = new Map<
+    string,
+    {
+      date: string;
+      sent: number;
+      delivered: number;
+      seen: number;
+      replied: number;
+      failed: number;
+    }
+  >();
+
+  function getOrCreate(dateKey: string) {
+    let day = dailyMap.get(dateKey);
+    if (!day) {
+      day = {
+        date: dateKey,
+        sent: 0,
+        delivered: 0,
+        seen: 0,
+        replied: 0,
+        failed: 0,
+      };
+      dailyMap.set(dateKey, day);
+    }
+    return day;
+  }
+
+  for (const r of input.recipients) {
+    if (r.sentAt) {
+      getOrCreate(formatDateKey(r.sentAt, input.timezone)).sent += 1;
+    }
+    if (r.deliveredAt) {
+      getOrCreate(formatDateKey(r.deliveredAt, input.timezone)).delivered += 1;
+    }
+    if (r.seenAt) {
+      getOrCreate(formatDateKey(r.seenAt, input.timezone)).seen += 1;
+    }
+    const replyAt = r.repliedAt ?? r.lastReplyAt;
+    if (replyAt) {
+      getOrCreate(formatDateKey(replyAt, input.timezone)).replied += 1;
+    }
+    if (r.failedAt) {
+      getOrCreate(formatDateKey(r.failedAt, input.timezone)).failed += 1;
+    }
+  }
+
+  if (dailyMap.size === 0 && input.campaignCreatedAt) {
+    getOrCreate(formatDateKey(input.campaignCreatedAt, input.timezone));
+  }
+
+  return Array.from(dailyMap.values())
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map((d) => {
+      const seenRate =
+        d.sent > 0
+          ? Math.min(100, Math.round((d.seen / d.sent) * 100))
+          : d.seen > 0
+            ? 100
+            : 0;
+      const replyRate =
+        d.sent > 0
+          ? Math.min(100, Math.round((d.replied / d.sent) * 100))
+          : d.replied > 0
+            ? 100
+            : 0;
+      return {
+        ...d,
+        seenRate,
+        replyRate,
+      };
+    });
+}
+
+function recordsToCsv(
+  records: Record<string, string | number>[],
+  customHeaders?: string[]
+): string {
+  if (records.length === 0) return "";
+  const defaultHeaders = [
     "Phone",
     "Status",
     "Device",
@@ -992,6 +1206,7 @@ function recordsToCsv(records: Record<string, string | number>[]): string {
     "LastReply",
     "FailedAt",
   ];
+  const headers = customHeaders ?? defaultHeaders;
   return [headers, ...records.map((record) => headers.map((h) => record[h] ?? ""))]
     .map((row) => row.map((value) => escapeCsvCell(String(value))).join(","))
     .join("\n");

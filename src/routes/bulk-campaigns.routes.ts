@@ -7,6 +7,7 @@ import * as bulkCampaigns from "../services/bulk_campaigns.service";
 const uuidParam = z.string().uuid();
 const reportQuery = z.object({
   format: z.enum(["csv", "xlsx"]).default("csv"),
+  type: z.enum(["recipients", "daily"]).default("recipients"),
 });
 const recipientStatus = z.enum([
   "pending",
@@ -287,7 +288,8 @@ router.get(
     const report = await bulkCampaigns.exportBulkCampaignReport(
       auth.wid,
       parsed.data,
-      query.format
+      query.format,
+      query.type
     );
     res.setHeader("Content-Type", report.contentType);
     res.setHeader(
