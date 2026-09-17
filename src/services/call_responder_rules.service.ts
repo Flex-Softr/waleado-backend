@@ -1,6 +1,7 @@
 import {
   CallResponderCallType,
   CallResponderMessageMode,
+  LiveChatMessageDirection,
   OutboundKind,
   OutboundStatus,
 } from "@prisma/client";
@@ -188,7 +189,11 @@ async function assertDeviceInWorkspace(workspaceId: string, deviceId: string) {
 async function validateRuleInput(
   workspaceId: string,
   input: CreateCallResponderRuleInput | UpdateCallResponderRuleInput,
-  existing?: { messageMode: CallResponderMessageMode; messageBody: string | null; templateId: string | null }
+  existing?: {
+    messageMode: CallResponderMessageMode;
+    messageBody: string | null;
+    templateId: string | null;
+  }
 ) {
   if (input.deviceId) {
     await assertDeviceInWorkspace(workspaceId, input.deviceId);
@@ -344,24 +349,96 @@ export async function deleteCallResponderRule(
   await prisma.callResponderRule.delete({ where: { id: ruleId } });
 }
 
+// In-memory sets to track processed calls and call states
 const processedCallKeys = new Map<string, number>();
 const PROCESSED_CALL_TTL_MS = 600_000; // 10 minutes
+
+// Track calls that were answered to avoid treating normal call endings as missed
+const acceptedCallIds = new Set<string>();
+
+// Per-caller cooldown to prevent spamming back-to-back calls within 30s
+const callerCooldowns = new Map<string, number>();
+const CALLER_COOLDOWN_MS = 30_000; // 30 seconds
 
 function pruneProcessedCalls(now: number): void {
   for (const [k, t] of processedCallKeys) {
     if (now - t > PROCESSED_CALL_TTL_MS) processedCallKeys.delete(k);
   }
+  for (const [phone, t] of callerCooldowns) {
+    if (now - t > CALLER_COOLDOWN_MS) callerCooldowns.delete(phone);
+  }
+}
+
+function parseSpintax(text: string): string {
+  return text.replace(/\{([^{}]+)\}/g, (_, choices) => {
+    const parts = choices.split("|");
+    return parts[Math.floor(Math.random() * parts.length)] ?? choices;
+  });
+}
+
+function renderCallResponderText(
+  rawText: string,
+  context: { phone: string; name?: string }
+): string {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const dateStr = now.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const name = context.name?.trim() || "there";
+
+  let rendered = rawText
+    .replace(/\{\{phone\}\}/gi, context.phone)
+    .replace(/\{\{name\}\}/gi, name)
+    .replace(/\{\{time\}\}/gi, timeStr)
+    .replace(/\{\{date\}\}/gi, dateStr);
+
+  return parseSpintax(rendered);
+}
+
+async function findContactName(
+  workspaceId: string,
+  rawPhone: string
+): Promise<string | undefined> {
+  const digits = rawPhone.replace(/\D/g, "");
+  if (!digits || digits.length < 5) return undefined;
+  try {
+    const contact = await prisma.contact.findFirst({
+      where: {
+        group: { workspaceId },
+        phone: { contains: digits.slice(-8) },
+      },
+      select: { name: true },
+    });
+    return contact?.name || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function mapCallStatusToCallType(
-  status: WACallUpdateType
+  status: WACallUpdateType,
+  callId: string
 ): CallResponderCallType | null {
   switch (status) {
     case "timeout":
       return CallResponderCallType.MISSED;
+    case "terminate":
+      // If the call was accepted previously, terminate is a normal hangup.
+      // If not accepted, terminate means caller hung up before answer (MISSED).
+      if (!acceptedCallIds.has(callId)) {
+        return CallResponderCallType.MISSED;
+      }
+      return null;
     case "reject":
       return CallResponderCallType.REJECTED;
     case "accept":
+      acceptedCallIds.add(callId);
       return CallResponderCallType.RECEIVED;
     default:
       return null;
@@ -369,7 +446,7 @@ function mapCallStatusToCallType(
 }
 
 /**
- * Dispatches active Call Responder rules when incoming call events (timeout/missed, reject, accept)
+ * Dispatches active Call Responder rules when incoming call events (timeout/missed, terminate, reject, accept)
  * are received from Baileys WhatsApp socket.
  */
 export async function dispatchCallResponderRulesForCall(
@@ -384,11 +461,8 @@ export async function dispatchCallResponderRulesForCall(
   pruneProcessedCalls(now);
 
   for (const call of calls) {
-    // Ignore group calls or missing caller info
+    // Ignore group calls
     if (call.isGroup) continue;
-
-    const detectedType = mapCallStatusToCallType(call.status);
-    if (!detectedType) continue;
 
     const rawFrom = call.from || call.chatId || call.callerPn;
     if (!rawFrom || rawFrom.includes("@g.us")) continue;
@@ -396,9 +470,28 @@ export async function dispatchCallResponderRulesForCall(
     const callerJid = jidNormalizedUser(rawFrom);
     if (!callerJid) continue;
 
+    // Detect call event type
+    const detectedType = mapCallStatusToCallType(call.status, call.id);
+    if (!detectedType) continue;
+
     const callKey = `${deviceId}:${call.id}:${detectedType}`;
     if (processedCallKeys.has(callKey)) continue;
     processedCallKeys.set(callKey, now);
+
+    const rawDigits = (call.callerPn || callerJid)
+      .split("@")[0]
+      .replace(/\D/g, "");
+    const phoneParsed = validateAndFormatPhone("+" + rawDigits);
+    const toPhone = phoneParsed.valid ? phoneParsed.e164 : "+" + rawDigits;
+
+    // Check per-caller cooldown to prevent spamming
+    const lastTrigger = callerCooldowns.get(toPhone);
+    if (lastTrigger && now - lastTrigger < CALLER_COOLDOWN_MS) {
+      console.log(
+        `[call-responder] skipping duplicate trigger for caller ${toPhone} (cooldown active)`
+      );
+      continue;
+    }
 
     const rules = await prisma.callResponderRule.findMany({
       where: {
@@ -415,13 +508,10 @@ export async function dispatchCallResponderRulesForCall(
     const matchingRule = rules.find((r) => r.callTypes.includes(detectedType));
     if (!matchingRule) continue;
 
+    callerCooldowns.set(toPhone, now);
     incrementCallsTodayForRule(matchingRule.id);
 
-    const rawDigits = (call.callerPn || callerJid)
-      .split("@")[0]
-      .replace(/\D/g, "");
-    const phoneParsed = validateAndFormatPhone("+" + rawDigits);
-    const toPhone = phoneParsed.valid ? phoneParsed.e164 : "+" + rawDigits;
+    const contactName = await findContactName(workspaceId, toPhone);
 
     const delayMs =
       Math.max(0, matchingRule.responseDelayMinutes) * 60 * 1000;
@@ -447,8 +537,12 @@ export async function dispatchCallResponderRulesForCall(
           matchingRule.messageMode === CallResponderMessageMode.TEXT &&
           matchingRule.messageBody
         ) {
-          content = { text: matchingRule.messageBody };
-          textSummary = matchingRule.messageBody;
+          const rendered = renderCallResponderText(matchingRule.messageBody, {
+            phone: toPhone,
+            name: contactName,
+          });
+          content = { text: rendered };
+          textSummary = rendered;
         }
 
         if (!content) return;
@@ -464,7 +558,7 @@ export async function dispatchCallResponderRulesForCall(
           data: { responsesSent: { increment: 1 } },
         });
 
-        await prisma.outboundMessage.create({
+        const outboundMsg = await prisma.outboundMessage.create({
           data: {
             workspaceId,
             deviceId,
@@ -479,6 +573,41 @@ export async function dispatchCallResponderRulesForCall(
             providerRef: waMsg?.key?.id ?? null,
           },
         });
+
+        // Sync with Live Chat thread & message so it appears seamlessly in conversation history
+        try {
+          const thread = await prisma.liveChatThread.upsert({
+            where: {
+              workspaceId_deviceId_peerPhone: {
+                workspaceId,
+                deviceId,
+                peerPhone: toPhone,
+              },
+            },
+            update: {
+              lastPreview: textSummary.slice(0, 200),
+              lastMessageAt: new Date(),
+            },
+            create: {
+              workspaceId,
+              deviceId,
+              peerPhone: toPhone,
+              lastPreview: textSummary.slice(0, 200),
+              lastMessageAt: new Date(),
+            },
+          });
+
+          await prisma.liveChatMessage.create({
+            data: {
+              threadId: thread.id,
+              direction: LiveChatMessageDirection.OUTBOUND,
+              bodyText: textSummary,
+              outboundMessageId: outboundMsg.id,
+            },
+          });
+        } catch (chatErr) {
+          console.warn("[call-responder] live-chat sync error:", chatErr);
+        }
 
         console.log(
           `[call-responder] sent automated response to ${toPhone} for rule "${matchingRule.name}" (${detectedType})`
