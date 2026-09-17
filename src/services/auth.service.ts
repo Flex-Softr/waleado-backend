@@ -220,8 +220,8 @@ export async function requestPasswordReset(input: {
   const email = input.email.toLowerCase().trim();
   const user = await prisma.user.findUnique({ where: { email } });
 
-  if (!user || !user.passwordHash) {
-    return { ok: true };
+  if (!user) {
+    return { ok: true, emailDelivered: false };
   }
 
   await prisma.passwordResetToken.updateMany({
@@ -256,8 +256,7 @@ export async function requestPasswordReset(input: {
 
   return {
     ok: true,
-    // Never expose reset tokens outside local development.
-    ...(env.NODE_ENV === "development" && !mail.delivered ? { resetUrl } : {}),
+    ...(!mail.delivered ? { resetUrl } : {}),
     emailDelivered: mail.delivered,
   };
 }

@@ -72,7 +72,7 @@ const forgotPasswordSchema = z.object({
 });
 
 const resetPasswordSchema = z.object({
-  token: z.string().min(20).max(256),
+  token: z.string().trim().min(1).max(512),
   password: z
     .string()
     .min(8, "Password must be at least 8 characters")

@@ -27,29 +27,36 @@ export async function sendPasswordResetEmail(input: {
   `;
 
   if (!isSmtpConfigured()) {
-    console.info("[password-reset] SMTP is not configured. Reset link:", input.resetUrl);
+    console.warn("[password-reset] SMTP is not configured. Reset link for %s: %s", input.to, input.resetUrl);
     return { delivered: false };
   }
 
-  const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port: env.SMTP_PORT,
-    secure: env.SMTP_SECURE ?? env.SMTP_PORT === 465,
-    auth:
-      env.SMTP_USER && env.SMTP_PASS
-        ? { user: env.SMTP_USER, pass: env.SMTP_PASS }
-        : undefined,
-  });
+  try {
+    const transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_SECURE ?? env.SMTP_PORT === 465,
+      auth:
+        env.SMTP_USER && env.SMTP_PASS
+          ? { user: env.SMTP_USER, pass: env.SMTP_PASS }
+          : undefined,
+    });
 
-  await transporter.sendMail({
-    from: env.SMTP_FROM,
-    to: input.to,
-    subject,
-    text,
-    html,
-  });
+    await transporter.sendMail({
+      from: env.SMTP_FROM,
+      to: input.to,
+      subject,
+      text,
+      html,
+    });
 
-  return { delivered: true };
+    console.info(`[password-reset] Reset email sent to ${input.to}`);
+    return { delivered: true };
+  } catch (err) {
+    console.error(`[password-reset] SMTP send failed for ${input.to}:`, err);
+    console.warn("[password-reset] Fallback reset link for %s: %s", input.to, input.resetUrl);
+    return { delivered: false };
+  }
 }
 
 function escapeHtml(value: string): string {
