@@ -550,7 +550,7 @@ async function buildAutoReplyPayload(
           cred.provider,
           cred.apiEndpoint
         );
-        const rawModel = rule.aiSkill.model || cred.model || "gemini-1.5-flash";
+        const rawModel = rule.aiSkill.model || cred.model || "gemini-3.6-flash";
         const model =
           resolveCatalogModelId(cred.provider, rawModel) ||
           (cred.provider === "GEMINI" && DEPRECATED_GEMINI_MODEL_ALIASES[rawModel]
@@ -600,7 +600,7 @@ async function buildAutoReplyPayload(
             defaultCred.provider,
             defaultCred.apiEndpoint
           );
-          const rawModel = defaultCred.model || "gemini-1.5-flash";
+          const rawModel = defaultCred.model || "gemini-3.6-flash";
           const model =
             resolveCatalogModelId(defaultCred.provider, rawModel) || rawModel;
           resolved = {
