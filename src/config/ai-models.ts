@@ -29,68 +29,52 @@ export const AI_PROVIDERS: {
 ];
 
 export const DEPRECATED_GEMINI_MODEL_ALIASES: Record<string, string> = {
-  "gemini-flash-latest": "gemini-1.5-flash",
-  "gemini-flash-lite-latest": "gemini-1.5-flash-8b",
-  "gemini-pro-latest": "gemini-1.5-pro",
-  "gemini-3.5-flash": "gemini-2.5-flash",
-  "gemini-3.5-flash-lite": "gemini-2.0-flash-lite",
-  "gemini-3.6-flash": "gemini-2.5-flash",
-  "gemini-3.7-flash": "gemini-2.5-flash",
-  "gemini-3.1-pro-preview": "gemini-2.5-pro",
+  "gemini-flash-latest": "gemini-3.6-flash",
+  "gemini-flash-lite-latest": "gemini-3.6-flash",
+  "gemini-pro-latest": "gemini-3.8-flash",
+  "gemini-1.5-flash": "gemini-3.6-flash",
+  "gemini-1.5-flash-8b": "gemini-3.6-flash",
+  "gemini-1.5-pro": "gemini-3.8-flash",
+  "gemini-2.5-flash": "gemini-3.6-flash",
+  "gemini-2.5-flash-lite": "gemini-3.6-flash",
+  "gemini-2.0-flash": "gemini-3.6-flash",
+  "gemini-2.0-flash-lite": "gemini-3.6-flash",
+  "gemini-2.5-pro": "gemini-3.8-flash",
+  "gemini-3.5-flash": "gemini-3.6-flash",
+  "gemini-3.5-flash-lite": "gemini-3.6-flash",
 };
 
 /** Curated accepted models for UI selects (free + paid). */
 export const AI_MODEL_CATALOG: AiModelCatalogEntry[] = [
   // Gemini — free-tier friendly
   {
-    id: "gemini-2.5-flash",
+    id: "gemini-3.6-flash",
     provider: "GEMINI",
-    label: "Gemini 2.5 Flash",
+    label: "Gemini 3.6 Flash",
     tier: "free",
-    modelId: "gemini-2.5-flash",
+    modelId: "gemini-3.6-flash",
   },
   {
-    id: "gemini-2.0-flash",
+    id: "gemini-3.8-flash",
     provider: "GEMINI",
-    label: "Gemini 2.0 Flash",
+    label: "Gemini 3.8 Flash",
     tier: "free",
-    modelId: "gemini-2.0-flash",
+    modelId: "gemini-3.8-flash",
   },
   {
-    id: "gemini-2.0-flash-lite",
+    id: "gemini-3.5-flash",
     provider: "GEMINI",
-    label: "Gemini 2.0 Flash Lite",
+    label: "Gemini 3.5 Flash",
     tier: "free",
-    modelId: "gemini-2.0-flash-lite",
-  },
-  {
-    id: "gemini-1.5-flash",
-    provider: "GEMINI",
-    label: "Gemini 1.5 Flash",
-    tier: "free",
-    modelId: "gemini-1.5-flash",
-  },
-  {
-    id: "gemini-1.5-flash-8b",
-    provider: "GEMINI",
-    label: "Gemini 1.5 Flash 8B",
-    tier: "free",
-    modelId: "gemini-1.5-flash-8b",
+    modelId: "gemini-3.5-flash",
   },
   // Gemini — paid / advanced
   {
-    id: "gemini-2.5-pro",
+    id: "gemini-3.1-pro-preview",
     provider: "GEMINI",
-    label: "Gemini 2.5 Pro",
+    label: "Gemini 3.1 Pro",
     tier: "paid",
-    modelId: "gemini-2.5-pro",
-  },
-  {
-    id: "gemini-1.5-pro",
-    provider: "GEMINI",
-    label: "Gemini 1.5 Pro",
-    tier: "paid",
-    modelId: "gemini-1.5-pro",
+    modelId: "gemini-3.1-pro-preview",
   },
   // OpenRouter — free
   {
