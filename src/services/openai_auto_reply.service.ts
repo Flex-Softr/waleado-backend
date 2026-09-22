@@ -87,12 +87,12 @@ export async function generateOpenAiReply(
     !res.ok &&
     res.status === 404 &&
     base.includes("googleapis.com") &&
-    body.model !== "gemini-1.5-flash"
+    body.model !== "gemini-3.6-flash"
   ) {
     console.warn(
-      `[ai] Gemini model "${body.model}" returned 404; retrying with "gemini-1.5-flash"`
+      `[ai] Gemini model "${body.model}" returned 404; retrying with "gemini-3.6-flash"`
     );
-    body.model = "gemini-1.5-flash";
+    body.model = "gemini-3.6-flash";
     res = await fetch(url, {
       method: "POST",
       headers: {
