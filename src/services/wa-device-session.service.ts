@@ -12,7 +12,11 @@ import {
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
 import { createNotification } from "./notifications.service";
-import { dispatchAutoRepliesForInbound } from "./auto_reply_inbound.service";
+import {
+  dispatchAutoRepliesForInbound,
+  isMessageAutomated,
+  recordHumanReply,
+} from "./auto_reply_inbound.service";
 import {
   recordCampaignMessageReceiptUpdates,
   recordCampaignMessageStatusUpdates,
@@ -772,6 +776,26 @@ export async function ensureWaDeviceSession(
       sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (!messages?.length) return;
         if (type !== "notify" && type !== "append") return;
+
+        // Detect manual human replies sent from the phone or WhatsApp Web
+        for (const m of messages) {
+          if (m.key.fromMe) {
+            const msgId = m.key.id;
+            if (msgId && isMessageAutomated(msgId)) {
+              continue;
+            }
+            const jid = m.key.remoteJid;
+            if (jid && jid !== "status@broadcast") {
+              const mPhone = jid.match(/^(\d+)(?::\d+)?@/);
+              recordHumanReply(
+                workspaceId,
+                deviceId,
+                mPhone ? `+${mPhone[1]}` : null,
+                jid
+              );
+            }
+          }
+        }
         try {
           await ingestInboundLiveChatMessages(
             workspaceId,

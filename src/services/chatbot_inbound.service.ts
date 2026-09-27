@@ -15,6 +15,8 @@ import {
   MAX_INBOUND_AUTO_REPLY_AGE_MS,
   waMessageTimestampMs,
   recordOutboundAutoReplyMessage,
+  hasHumanRepliedRecently,
+  markMessageAsAutomated,
 } from "./auto_reply_inbound.service";
 
 type MessageUpsertKind = "notify" | "append";
@@ -221,11 +223,14 @@ async function sendMessageNode(
   }
   const text = messageBodyFromNode(node);
   if (!text) return false;
-  await withDeviceOutboundGate(
+  const sent = await withDeviceOutboundGate(
     deviceId,
     { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
     () => sock.sendMessage(toJid, { text })
   );
+  if (sent?.key?.id) {
+    markMessageAsAutomated(sent.key.id);
+  }
   return true;
 }
 
@@ -293,6 +298,15 @@ export async function dispatchChatbotFlowForInbound(
 
     const inboundText = inboundTextFromMessage(m, extractMessageContent);
     if (!inboundText) continue;
+
+    const humanReplied = await hasHumanRepliedRecently(
+      workspaceId,
+      deviceId,
+      peerPhone,
+      remoteJid
+    );
+    if (humanReplied) continue;
+
     const selected = firstTriggeredFlow(flows, inboundText);
     if (!selected) continue;
 
@@ -314,11 +328,14 @@ export async function dispatchChatbotFlowForInbound(
         );
         if (resolved?.apiKey) {
           const aiText = await generateOpenAiReply(resolved, inboundText);
-          await withDeviceOutboundGate(
+          const sent = await withDeviceOutboundGate(
             deviceId,
             { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
             () => sock.sendMessage(remoteJid, { text: aiText })
           );
+          if (sent?.key?.id) {
+            markMessageAsAutomated(sent.key.id);
+          }
           sentAny = true;
           if (peerPhone) {
             void recordOutboundAutoReplyMessage(

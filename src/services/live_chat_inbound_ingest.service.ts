@@ -4,6 +4,10 @@ import { prisma } from "../lib/prisma";
 import { attributeInboundReplyToCampaign } from "./campaign_engagement.service";
 import { recordTemplateMediaBuffer } from "./template-media-assets.service";
 import { encodeLiveChatBodyText } from "./live_chat_message_codec";
+import {
+  isMessageAutomated,
+  recordHumanReply,
+} from "./auto_reply_inbound.service";
 
 const PROCESSED_INBOUND_TTL_MS = 10 * 60 * 1000;
 const processedInboundMessageKeys = new Map<string, number>();
@@ -134,7 +138,13 @@ export async function ingestInboundLiveChatMessages(
   if (!messages.length) return;
   const now = Date.now();
   for (const m of messages) {
-    if (!m.message || m.key.fromMe) continue;
+    if (!m.message) continue;
+    if (m.key.fromMe) {
+      const msgId = m.key.id;
+      if (msgId && isMessageAutomated(msgId)) {
+        continue;
+      }
+    }
     if (!claimInboundMessage(deviceId, m, now)) continue;
     const jid = destinationJidForInbound(m);
     if (!jid) continue;
@@ -234,10 +244,19 @@ export async function ingestInboundLiveChatMessages(
       },
     });
 
+    const direction = m.key.fromMe
+      ? LiveChatMessageDirection.OUTBOUND
+      : LiveChatMessageDirection.INBOUND;
+
+    if (m.key.fromMe) {
+      meta = { ...(meta ?? {}), sender: "human", source: "phone" };
+      recordHumanReply(workspaceId, deviceId, peerPhone, jid);
+    }
+
     const existingMessage = await prisma.liveChatMessage.findFirst({
       where: {
         threadId: thread.id,
-        direction: LiveChatMessageDirection.INBOUND,
+        direction,
         createdAt,
         bodyText: storedBody,
       },
@@ -249,13 +268,16 @@ export async function ingestInboundLiveChatMessages(
       : await prisma.liveChatMessage.create({
           data: {
             threadId: thread.id,
-            direction: LiveChatMessageDirection.INBOUND,
+            direction,
             bodyText: storedBody,
             createdAt,
+            meta: meta
+              ? (meta as import("@prisma/client").Prisma.InputJsonValue)
+              : undefined,
           },
         });
 
-    if (!existingMessage) {
+    if (!existingMessage && !m.key.fromMe) {
       await attributeInboundReplyToCampaign({
         workspaceId,
         deviceId,

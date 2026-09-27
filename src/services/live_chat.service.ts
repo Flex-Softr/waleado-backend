@@ -20,7 +20,10 @@ import {
   encodeLiveChatBodyText,
 } from "./live_chat_message_codec";
 import { createLiveChatMediaToken } from "./live_chat_media_sign.service";
-import { clearActiveAiSessionsForPhone } from "./auto_reply_inbound.service";
+import {
+  clearActiveAiSessionsForPhone,
+  recordHumanReply,
+} from "./auto_reply_inbound.service";
 
 export type LiveChatThreadJson = {
   id: string;
@@ -444,6 +447,7 @@ export async function sendLiveChatMessage(
         direction: LiveChatMessageDirection.OUTBOUND,
         bodyText: text,
         outboundMessageId: outbound.id,
+        meta: { sender: "human", source: "live_chat" },
       },
     });
 
@@ -455,6 +459,7 @@ export async function sendLiveChatMessage(
       },
     });
 
+    recordHumanReply(workspaceId, thread.deviceId, thread.peerPhone);
     clearActiveAiSessionsForPhone(workspaceId, thread.deviceId, thread.peerPhone);
 
     return {
@@ -570,6 +575,7 @@ export async function sendLiveChatMessage(
       direction: LiveChatMessageDirection.OUTBOUND,
       bodyText: storedText,
       outboundMessageId: row.id,
+      meta: { sender: "human", source: "live_chat" },
     },
   });
   await prisma.liveChatThread.update({
@@ -579,6 +585,7 @@ export async function sendLiveChatMessage(
       lastMessageAt: new Date(),
     },
   });
+  recordHumanReply(workspaceId, thread.deviceId, thread.peerPhone);
   clearActiveAiSessionsForPhone(workspaceId, thread.deviceId, thread.peerPhone);
   return {
     message: {
