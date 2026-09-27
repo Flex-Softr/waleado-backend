@@ -23,8 +23,8 @@ const createBody = z
     deviceMode: z
       .enum(["single", "failover", "round_robin"])
       .default("single"),
-    delayMinSec: z.number().int().min(0).max(3600).default(12),
-    delayMaxSec: z.number().int().min(0).max(3600).default(45),
+    delayMinSec: z.number().int().min(0).max(3600).default(150),
+    delayMaxSec: z.number().int().min(0).max(3600).default(200),
     maxRetries: z.number().int().min(0).max(10).default(3),
   })
   .superRefine((data, ctx) => {

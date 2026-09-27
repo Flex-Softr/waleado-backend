@@ -54,8 +54,8 @@ const createBody = z
     scheduleType: z.enum(["immediate", "scheduled"]),
     scheduledAt: z.string().optional().nullable(),
     deviceMode: z.enum(["single", "failover", "round_robin"]),
-    delayMinSec: z.number().int().min(0).max(3600),
-    delayMaxSec: z.number().int().min(0).max(3600),
+    delayMinSec: z.number().int().min(0).max(3600).default(150),
+    delayMaxSec: z.number().int().min(0).max(3600).default(200),
     maxRetries: z.number().int().min(0).max(10),
     aiRewrite: z
       .object({

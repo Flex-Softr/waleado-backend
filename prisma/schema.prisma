@@ -609,13 +609,13 @@ model BulkCampaign {
    */
   deviceMode         BulkDeviceMode          @default(ROUND_ROBIN)
   /**
-   * Random delay between sends: lower bound (seconds). Server enforces minimum 12s when bridge sends.
+   * Random delay between sends: lower bound (seconds).
    */
-  delayMinSec        Int                     @default(12)
+  delayMinSec        Int                     @default(150)
   /**
    * Random delay between sends: upper bound (seconds).
    */
-  delayMaxSec        Int                     @default(45)
+  delayMaxSec        Int                     @default(200)
   maxRetries         Int                     @default(3)
   antiBlockEnabled   Boolean                 @default(false)
   spintaxEnabled     Boolean                 @default(false)
