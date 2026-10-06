@@ -159,7 +159,7 @@ router.post(
       name: body.name,
       category: body.category,
       typeId: body.typeId,
-      content: body.content,
+      content: body.content ?? "",
       footer: body.footer,
       buttons: body.buttons,
       media: body.media,
