@@ -518,7 +518,7 @@ function plainTextFromTemplate(tpl: {
 }): string {
   const body = (tpl.body ?? "").trim();
   const name = tpl.name.trim();
-  const base = body || name;
+  const base = body;
   const foot = (tpl.footer ?? "").trim();
   if (base && foot) return `${base}\n\n${foot}`;
   if (base) return base;

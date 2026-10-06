@@ -101,8 +101,7 @@ export async function buildTemplateWhatsAppContent(
   tpl: TemplateRowForSend
 ): Promise<AnyMessageContent> {
   const caption = captionFromTemplate(tpl.body, tpl.footer);
-  const textFallback =
-    tpl.body?.trim() || tpl.name.trim() || " ";
+  const textFallback = tpl.body?.trim() || " ";
   const typeRaw = tpl.typeId;
   const typeId: TemplateTypeId | null = isTemplateTypeId(typeRaw)
     ? typeRaw
@@ -156,7 +155,7 @@ export async function buildTemplateWhatsAppContent(
         mime.includes("ogg") ||
         mime.includes("opus") ||
         mime.startsWith("audio/ogg");
-      return { audio: r.upload, ptt };
+      return { audio: r.upload, mimetype: mime || "audio/mp4", ptt };
     }
     case "message_location": {
       const lat = Number(media.latitude);
@@ -285,7 +284,7 @@ export async function buildBulkTextCampaignContent(
         mime.includes("ogg") ||
         mime.includes("opus") ||
         mime.startsWith("audio/ogg");
-      return { audio: buf, ptt };
+      return { audio: buf, mimetype: mime || "audio/mp4", ptt };
     }
     case "document":
       return {
@@ -337,7 +336,7 @@ export async function buildAutoReplyMediaContent(
         mime.includes("ogg") ||
         mime.includes("opus") ||
         mime.startsWith("audio/ogg");
-      return { audio: buf, ptt };
+      return { audio: buf, mimetype: mime || "audio/mp4", ptt };
     }
     default:
       return {
