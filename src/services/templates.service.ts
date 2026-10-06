@@ -215,10 +215,10 @@ export async function createTemplate(
   workspaceId: string,
   input: CreateTemplateInput
 ): Promise<TemplateJson> {
-  const name = input.name.trim();
-  const content = input.content.trim();
-  if (!name || !content) {
-    throw new AppError(400, "Name and message content are required", "VALIDATION");
+  const name = input.name?.trim() || "";
+  const content = input.content?.trim() || "";
+  if (!name) {
+    throw new AppError(400, "Name is required", "VALIDATION");
   }
   if (!isTemplateTypeId(input.typeId)) {
     throw new AppError(400, "Invalid template type", "VALIDATION");
@@ -282,7 +282,7 @@ export async function createTemplate(
         name: name.slice(0, 200),
         waTemplateName,
         language: (input.language ?? "en").slice(0, 16),
-        body: content.slice(0, 4096),
+        body: content ? content.slice(0, 4096) : null,
         category,
         typeId,
         footer,
@@ -355,10 +355,7 @@ export async function updateTemplate(
 
   if (input.content !== undefined) {
     const c = input.content.trim();
-    if (!c) {
-      throw new AppError(400, "Message content cannot be empty", "VALIDATION");
-    }
-    data.body = c.slice(0, 4096);
+    data.body = c ? c.slice(0, 4096) : null;
   }
 
   if (input.footer !== undefined) {
