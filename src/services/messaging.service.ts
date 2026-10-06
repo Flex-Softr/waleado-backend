@@ -169,7 +169,7 @@ export async function sendSingleMessage(
       );
     }
     const summary =
-      tpl.body?.trim() || tpl.name.trim() || "(template message)";
+      tpl.body?.trim() || "(template message)";
     if (summary.length > 4096) {
       throw new AppError(400, "Template content is too long", "VALIDATION");
     }
