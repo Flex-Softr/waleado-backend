@@ -721,7 +721,15 @@ export async function ensureWaDeviceSession(
           const isReplaced = code === DisconnectReason.connectionReplaced;
           const isBadSession = code === DisconnectReason.badSession;
 
-          if (isLoggedOut || isReplaced || isBadSession) {
+          if (isReplaced) {
+            console.log(
+              `[wa-session] Connection replaced for device ${deviceId}. This usually happens during a rolling redeploy. Closing in-memory session without deleting files.`
+            );
+            // The new container has taken over the session. Do not reconnect, do not delete files.
+            return;
+          }
+
+          if (isLoggedOut || isBadSession) {
             console.log(
               `[wa-session] permanent disconnect (code: ${code}) for device ${deviceId}. Resetting to QR_READY.`
             );
@@ -744,9 +752,7 @@ export async function ensureWaDeviceSession(
               title: "WhatsApp Device Disconnected",
               message: isLoggedOut
                 ? "Your WhatsApp session was logged out from your phone. Please scan the QR code to re-connect."
-                : isReplaced
-                ? "WhatsApp session was opened on another client. Please scan QR to re-connect."
-                : "WhatsApp session expired. Please scan QR to re-connect.",
+                : "WhatsApp session expired or is invalid. Please scan QR to re-connect.",
               link: "/devices",
               metadata: { deviceId, code },
             });
