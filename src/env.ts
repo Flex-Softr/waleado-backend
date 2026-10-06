@@ -93,7 +93,7 @@ const envSchema = z.object({
     if (typo !== undefined && typo !== "" && typo !== null) return typo;
     return undefined;
   }, z.coerce.number().positive().optional()),
-  /** Absolute or repo-relative folder for Baileys auth files (default: `<repo>/.wa-sessions`) */
+  /** Absolute or server-relative folder for Baileys auth files (default: `<server>/.wa-sessions`) */
   WA_SESSIONS_DIR: z.string().optional(),
   /**
    * Baileys / real QR + sending. Must be a real boolean after parse — if this were ever
@@ -105,14 +105,14 @@ const envSchema = z.object({
     if (s === "false" || s === "0" || s === "no" || s === "off") return false;
     return true;
   }, z.boolean()),
-  /** Directory for uploaded template images/docs (default: `<repo>/uploads/template-media`). */
+  /** Directory for uploaded template images/docs (default: `<server>/uploads/template-media`). */
   TEMPLATE_MEDIA_ROOT: z
     .string()
     .optional()
     .transform((v) => {
       const raw = v?.trim();
       if (raw) return path.resolve(raw);
-      return path.join(repoRoot, "uploads", "template-media");
+      return path.join(serverDir, "uploads", "template-media");
     }),
   /** ISO 3166-1 alpha-2 (e.g. US, SA). Helps parse local numbers missing +country. */
   PHONE_DEFAULT_REGION: z
