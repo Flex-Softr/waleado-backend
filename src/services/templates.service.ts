@@ -91,9 +91,17 @@ async function uniqueWaTemplateName(
 
 function parseButtons(value: Prisma.JsonValue | null): TemplateInteractiveButtonJson[] | null {
   if (value === null || value === undefined) return null;
-  if (!Array.isArray(value)) return null;
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(parsed)) return null;
   const out: TemplateInteractiveButtonJson[] = [];
-  for (const item of value) {
+  for (const item of parsed) {
     if (!item || typeof item !== "object") continue;
     const o = item as Record<string, unknown>;
     const id = typeof o.id === "string" ? o.id : "";
@@ -115,8 +123,16 @@ function parseButtons(value: Prisma.JsonValue | null): TemplateInteractiveButton
 
 function parseMedia(value: Prisma.JsonValue | null): Record<string, unknown> | null {
   if (value === null || value === undefined) return null;
-  if (typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) return null;
+  return parsed as Record<string, unknown>;
 }
 
 function toJson(t: {
