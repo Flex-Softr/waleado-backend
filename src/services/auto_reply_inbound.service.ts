@@ -988,6 +988,14 @@ export async function dispatchAutoRepliesForInbound(
           { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
           () => sock.sendMessage(remoteJid, result.payload)
         );
+        const audioFollowUp = result.textContent;
+        if (rule.messageMode === "TEMPLATE" && rule.template?.typeId === "message_audio" && audioFollowUp) {
+          await withDeviceOutboundGate(
+            deviceId,
+            { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+            () => sock.sendMessage(remoteJid, { text: audioFollowUp })
+          );
+        }
         if (sent?.key?.id) {
           markMessageAsAutomated(sent.key.id);
         }

@@ -553,6 +553,22 @@ export async function dispatchCallResponderRulesForCall(
           () => sock.sendMessage(callerJid, content as never)
         );
 
+        if (
+          matchingRule.messageMode === CallResponderMessageMode.TEMPLATE &&
+          matchingRule.template?.typeId === "message_audio"
+        ) {
+          const followUp = [matchingRule.template.body?.trim(), matchingRule.template.footer?.trim()]
+            .filter(Boolean)
+            .join("\n\n");
+          if (followUp) {
+            await withDeviceOutboundGate(
+              deviceId,
+              { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+              () => sock.sendMessage(callerJid, { text: followUp } as never)
+            );
+          }
+        }
+
         await prisma.callResponderRule.update({
           where: { id: matchingRule.id },
           data: { responsesSent: { increment: 1 } },

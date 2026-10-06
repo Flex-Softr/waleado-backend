@@ -139,6 +139,7 @@ export async function sendSingleMessage(
   > | null = null;
   let mediaWaContent: import("@whiskeysockets/baileys").AnyMessageContent | null = null;
   let textToSend: string;
+  let followUpText: string | null = null;
 
   if (payload.kind === "text") {
     const text = payload.bodyText.trim();
@@ -177,6 +178,13 @@ export async function sendSingleMessage(
     templateId = tpl.id;
     bodyText = null;
     kind = OutboundKind.TEMPLATE;
+
+    if (tpl.typeId === "message_audio") {
+      const audioBody = [tpl.body?.trim(), tpl.footer?.trim()].filter(Boolean).join("\n\n");
+      if (audioBody) {
+        followUpText = audioBody;
+      }
+    }
   } else if (payload.kind === "media") {
     let buffer: Buffer;
     let resolvedMime = (payload.mimeType || "").trim();
@@ -244,6 +252,9 @@ export async function sendSingleMessage(
       mediaWaContent = { video: buffer, ...(caption ? { caption } : {}), mimetype: resolvedMime };
     } else if (resolvedMime.startsWith("audio/")) {
       mediaWaContent = { audio: buffer, mimetype: resolvedMime, ptt: false };
+      if (caption) {
+        followUpText = caption;
+      }
     } else {
       mediaWaContent = {
         document: buffer,
@@ -339,6 +350,15 @@ export async function sendSingleMessage(
       { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
       () => sock.sendMessage(jid, outgoing as never)
     );
+
+    if (followUpText) {
+      await withDeviceOutboundGate(
+        device.id,
+        { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+        () => sock.sendMessage(jid, { text: followUpText } as never)
+      );
+    }
+
     const key = waMsg?.key;
     const providerRef = key?.id
       ? `${key.remoteJid ?? jid}:${key.id}`

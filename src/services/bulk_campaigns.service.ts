@@ -2246,6 +2246,13 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
             )
           : await buildTemplateWhatsAppContent(workspaceId, templateRow!);
 
+      const followUpText =
+        kind === OutboundKind.TEMPLATE && templateRow?.typeId === "message_audio"
+          ? [templateRow.body?.trim(), templateRow.footer?.trim()].filter(Boolean).join("\n\n")
+          : kind === OutboundKind.TEXT && attachmentType === "audio" && (personalizedText?.trim() || "")
+            ? (personalizedText?.trim() || "")
+            : null;
+
       const trySend = async (devId: string) => {
         return withDeviceOutboundGate(
           devId,
@@ -2259,7 +2266,11 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
             if (!sock) {
               throw new Error("WhatsApp session offline — open Devices and reconnect.");
             }
-            return sock.sendMessage(jid, outgoing);
+            const sent = await sock.sendMessage(jid, outgoing);
+            if (followUpText) {
+              await sock.sendMessage(jid, { text: followUpText });
+            }
+            return sent;
           }
         );
       };

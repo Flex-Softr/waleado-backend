@@ -219,6 +219,16 @@ async function sendMessageNode(
       { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
       () => sock.sendMessage(toJid, content)
     );
+    if (tpl.typeId === "message_audio") {
+      const followUp = [tpl.body?.trim(), tpl.footer?.trim()].filter(Boolean).join("\n\n");
+      if (followUp) {
+        await withDeviceOutboundGate(
+          deviceId,
+          { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },
+          () => sock.sendMessage(toJid, { text: followUp })
+        );
+      }
+    }
     return true;
   }
   const text = messageBodyFromNode(node);
