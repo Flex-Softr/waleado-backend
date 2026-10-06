@@ -56,7 +56,7 @@ const createBody = z.object({
   name: z.string().min(1).max(200),
   category: z.enum(["general", "marketing", "transactional", "utility"]),
   typeId: z.string().min(1).max(64),
-  content: z.string().min(1).max(4096),
+  content: z.string().max(4096).optional(),
   footer: z.string().max(500).optional().nullable(),
   buttons: z.array(buttonSchema).max(5).optional(),
   /** Type-specific JSON (file id, URLs, location, poll options, list rows, …). */
@@ -68,7 +68,7 @@ const createBody = z.object({
 const patchBody = z.object({
   name: z.string().min(1).max(200).optional(),
   category: z.enum(["general", "marketing", "transactional", "utility"]).optional(),
-  content: z.string().min(1).max(4096).optional(),
+  content: z.string().max(4096).optional(),
   footer: z.string().max(500).optional().nullable(),
   buttons: z.array(buttonSchema).max(5).optional(),
   media: z.record(z.string(), z.unknown()).optional(),
