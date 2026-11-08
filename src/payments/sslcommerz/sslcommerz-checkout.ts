@@ -3,9 +3,7 @@ import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/errors";
 import { env } from "../../env";
 import type { InitiateCheckoutInput } from "../types";
-import type { PlanIdApi } from "../../lib/plan-mapping";
 import * as sslApi from "./sslcommerz-api";
-import { planAmount } from "../fulfill-sslcommerz";
 
 function apiPublicBase(): string {
   return env.API_PUBLIC_URL.replace(/\/$/, "");
@@ -38,7 +36,8 @@ export async function initiateSslCommerzCheckout(
     );
   }
 
-  const { amount, currency } = planAmount(input.planId);
+  const amount = input.amount.toFixed(2);
+  const currency = input.currency.toUpperCase();
   const tranId = newTranId();
 
   const successUrl = `${apiPublicBase()}/v1/payments/sslcommerz/browser-return`;
@@ -55,6 +54,7 @@ export async function initiateSslCommerzCheckout(
       gateway: "sslcommerz",
       tranId,
       workspaceId: input.workspaceId,
+      invoiceId: input.invoiceId,
       planId: input.planId,
       amount,
       currency,
@@ -73,7 +73,7 @@ export async function initiateSslCommerzCheckout(
     cancel_url: cancelUrl,
     ipn_url: ipnUrl,
     product_category: "non-physical-goods",
-    product_name: `Waleado ${input.planId} plan`,
+    product_name: input.description.slice(0, 250),
     cus_name: cusName,
     cus_email: cusEmail,
     cus_phone: phone.slice(0, 20),
@@ -83,7 +83,7 @@ export async function initiateSslCommerzCheckout(
     cus_country: "Bangladesh",
     cus_postcode: "1000",
     value_a: input.workspaceId,
-    value_b: input.planId,
+    value_b: input.invoiceId,
     value_c: "waleado",
     value_d: tranId,
   };

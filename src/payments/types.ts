@@ -8,12 +8,20 @@ export type InitiateCheckoutInput = {
   userName: string | null;
   /** SSLCommerz requires a customer phone on file. */
   customerPhone: string;
-  planId: Exclude<PlanIdApi, "free">;
+  invoiceId: string;
+  planId: PlanIdApi;
+  /** What is charged, in the invoice currency (BDT). */
+  amount: number;
+  currency: string;
+  /** Charged amount in USD for Stripe (null when the price has no USD amount). */
+  amountUsd: number | null;
+  description: string;
 };
 
 export type InitiateCheckoutResult =
   | { kind: "redirect"; url: string }
-  | { kind: "demo"; planId: PlanIdApi };
+  /** Nothing to pay (credit covered it, or local demo mode): already activated. */
+  | { kind: "activated" };
 
 export type PaymentGatewayMeta = {
   id: PaymentGatewayId;

@@ -5,437 +5,172 @@ import { AppError } from "../lib/errors";
 import { env } from "../env";
 import { getStripe, isStripeKeyConfigured } from "../lib/stripe-client";
 import { listPaymentGateways } from "../payments/gateway-catalog";
-import {
-  apiPaidPlanToDb,
-  planToApi,
-  type PlanIdApi,
-} from "../lib/plan-mapping";
+import { planToApi, type PlanIdApi } from "../lib/plan-mapping";
 import { matchSubscriptionPriceToPlan } from "../payments/stripe/stripe-price-ref";
+import {
+  getBillingSettings,
+  getCatalogPlan,
+  trialDurationMs,
+} from "../billing/catalog.service";
+import {
+  getEntitlements,
+  getMessageUsage,
+  invalidateEntitlements,
+} from "../billing/entitlements.service";
+import { applyPaidInvoice } from "../billing/invoices.service";
 
-const ACTIVE = new Set(["active", "trialing", "past_due"]);
+const DAY_MS = 24 * 60 * 60 * 1000;
+const STRIPE_ACTIVE = new Set(["active", "trialing", "past_due"]);
 
 function appPublicBase(): string {
   return env.APP_PUBLIC_URL.replace(/\/$/, "");
 }
 
-/**
- * SSLCommerz is one-time / period-based (no recurring webhook). Downgrade when
- * `currentPeriodEnd` has passed so paid features do not continue forever.
- */
-export async function enforceSslCommerzPeriodExpiry(
-  workspaceId: string
-): Promise<boolean> {
-  const now = new Date();
-  const result = await prisma.workspace.updateMany({
-    where: {
-      id: workspaceId,
-      lastPaymentGateway: "sslcommerz",
-      plan: { not: Plan.FREE },
-      currentPeriodEnd: { lt: now },
-    },
-    data: {
-      plan: Plan.FREE,
-      subscriptionStatus: "expired",
-      currentPeriodEnd: null,
-      lastPaymentGateway: null,
-    },
-  });
-  return result.count > 0;
+/** Current reverse-trial length, as configured by an admin. */
+export async function currentTrialDurationMs(): Promise<number> {
+  return trialDurationMs(await getBillingSettings());
 }
 
-/** Global sweep for expired SSLCommerz periods (no per-workspace request needed). */
-export async function expireAllDueSslCommerzWorkspaces(): Promise<number> {
-  const now = new Date();
-  const result = await prisma.workspace.updateMany({
-    where: {
-      lastPaymentGateway: "sslcommerz",
-      plan: { not: Plan.FREE },
-      currentPeriodEnd: { lt: now },
-    },
-    data: {
-      plan: Plan.FREE,
-      subscriptionStatus: "expired",
-      currentPeriodEnd: null,
-      lastPaymentGateway: null,
-    },
-  });
-  return result.count;
-}
-
-export const TRIAL_DURATION_DAYS = 3;
-export const TRIAL_DURATION_MS = TRIAL_DURATION_DAYS * 24 * 60 * 60 * 1000;
-
 /**
- * Ensures an account starts its 3-day free trial on first sign-in/use.
- * Only once can an account receive the trial.
+ * Starts the one-time reverse trial for a workspace that never had one.
+ * After the trial the workspace keeps working on the Free plan (no lockout).
  */
 export async function ensureTrialStarted(
   userId?: string | null,
   workspaceId?: string | null
-): Promise<{
-  isTrial: boolean;
-  isExpired: boolean;
-  daysRemaining: number;
-}> {
-  if (!workspaceId) {
-    return { isTrial: false, isExpired: false, daysRemaining: 0 };
-  }
-
+): Promise<void> {
+  if (!workspaceId) return;
   const ws = await prisma.workspace.findUnique({
     where: { id: workspaceId },
-    select: {
-      id: true,
-      plan: true,
-      subscriptionStatus: true,
-      trialUsed: true,
-      trialStartedAt: true,
-      trialEndsAt: true,
-    },
+    select: { plan: true, trialUsed: true, trialStartedAt: true, lifetimeTier: true },
   });
+  if (!ws || ws.trialUsed || ws.trialStartedAt) return;
+  if (ws.plan !== Plan.FREE || ws.lifetimeTier) return;
 
-  if (!ws) {
-    return { isTrial: false, isExpired: false, daysRemaining: 0 };
-  }
-
-  // Platform admins never have a trial
   if (userId) {
     const u = await prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true },
+      select: { role: true, trialUsed: true },
     });
-    if (u?.role === "ADMIN") {
-      return { isTrial: false, isExpired: false, daysRemaining: 0 };
+    // Platform admins have full access; a user gets only one trial across workspaces.
+    if (u?.role === "ADMIN" || u?.trialUsed) {
+      await prisma.workspace.update({ where: { id: workspaceId }, data: { trialUsed: true } });
+      return;
     }
-  }
-
-  const adminMember = await prisma.membership.findFirst({
-    where: {
-      workspaceId,
-      user: { role: "ADMIN" },
-    },
-  });
-  if (adminMember) {
-    return { isTrial: false, isExpired: false, daysRemaining: 0 };
-  }
-
-  // If already on a paid plan, trial is not active
-  if (ws.plan !== Plan.FREE) {
-    return { isTrial: false, isExpired: false, daysRemaining: 0 };
   }
 
   const now = new Date();
-
-  // If user provided, check if user has already consumed a trial
-  let userTrialUsed = false;
-  if (userId) {
-    const u = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { trialUsed: true },
+  const trialEndsAt = new Date(now.getTime() + (await currentTrialDurationMs()));
+  await prisma.$transaction(async (tx) => {
+    await tx.workspace.update({
+      where: { id: workspaceId },
+      data: { trialUsed: true, trialStartedAt: now, trialEndsAt },
     });
-    if (u?.trialUsed) {
-      userTrialUsed = true;
-    }
-  }
-
-  // Case 1: Account has never used trial -> Start 3-day trial now!
-  if (!ws.trialUsed && !ws.trialStartedAt && !userTrialUsed) {
-    const trialStartedAt = now;
-    const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
-
-    await prisma.$transaction(async (tx) => {
-      await tx.workspace.update({
-        where: { id: workspaceId },
-        data: {
-          trialUsed: true,
-          trialStartedAt,
-          trialEndsAt,
-          subscriptionStatus: "trialing",
-        },
+    if (userId) {
+      await tx.user.update({
+        where: { id: userId },
+        data: { trialUsed: true, trialStartedAt: now, trialEndsAt },
       });
-
-      if (userId) {
-        await tx.user.update({
-          where: { id: userId },
-          data: {
-            trialUsed: true,
-            trialStartedAt,
-            trialEndsAt,
-          },
-        });
-      }
-    });
-
-    return { isTrial: true, isExpired: false, daysRemaining: TRIAL_DURATION_DAYS };
-  }
-
-  // Case 2: Workspace has an existing trial
-  if (ws.trialEndsAt) {
-    if (now > ws.trialEndsAt) {
-      if (ws.subscriptionStatus === "trialing") {
-        await prisma.workspace.update({
-          where: { id: workspaceId },
-          data: { subscriptionStatus: "expired" },
-        });
-      }
-      return { isTrial: true, isExpired: true, daysRemaining: 0 };
-    } else {
-      const remainingMs = ws.trialEndsAt.getTime() - now.getTime();
-      const daysRemaining = Math.max(
-        1,
-        Math.ceil(remainingMs / (24 * 60 * 60 * 1000))
-      );
-      return { isTrial: true, isExpired: false, daysRemaining };
     }
-  }
-
-  // Case 3: trialUsed is true, but dates missing or expired
-  return { isTrial: true, isExpired: true, daysRemaining: 0 };
+  });
+  invalidateEntitlements(workspaceId);
 }
 
-/**
- * Checks whether a workspace currently has active access (either via active paid subscription
- * or via active 3-day trial). Platform admins always have access.
- */
-export async function checkWorkspaceSubscriptionAccess(
-  workspaceId: string,
-  userId?: string | null
-): Promise<{
-  hasAccess: boolean;
-  isTrial: boolean;
-  isExpired: boolean;
-  daysRemaining?: number;
-  reason?: string;
-}> {
-  if (userId) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-    if (user?.role === "ADMIN") {
-      return { hasAccess: true, isTrial: false, isExpired: false };
-    }
-  }
+function daysUntil(d: Date | null, now: Date): number | null {
+  if (!d) return null;
+  return Math.max(0, Math.ceil((d.getTime() - now.getTime()) / DAY_MS));
+}
 
-  const adminMember = await prisma.membership.findFirst({
-    where: {
-      workspaceId,
-      user: { role: "ADMIN" },
-    },
-  });
-  if (adminMember) {
-    return { hasAccess: true, isTrial: false, isExpired: false };
-  }
-
-  await enforceSslCommerzPeriodExpiry(workspaceId);
-
-  const ws = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
-    select: {
-      plan: true,
-      subscriptionStatus: true,
-      currentPeriodEnd: true,
-      lastPaymentGateway: true,
-      trialUsed: true,
-      trialStartedAt: true,
-      trialEndsAt: true,
-    },
-  });
-
-  if (!ws) {
-    return { hasAccess: false, isTrial: false, isExpired: false, reason: "NOT_FOUND" };
-  }
-
-  // Active paid subscription check
-  if (ws.plan !== Plan.FREE) {
-    const statusOk =
-      ws.subscriptionStatus && ACTIVE.has(ws.subscriptionStatus);
-    if (statusOk) {
-      return { hasAccess: true, isTrial: false, isExpired: false };
-    }
-    if (ws.subscriptionStatus === "demo") {
-      return { hasAccess: true, isTrial: false, isExpired: false };
-    }
-  }
-
-  // Free plan -> must be on active 3-day trial
-  const trial = await ensureTrialStarted(userId, workspaceId);
-  if (trial.isTrial && !trial.isExpired) {
-    return {
-      hasAccess: true,
-      isTrial: true,
-      isExpired: false,
-      daysRemaining: trial.daysRemaining,
-    };
-  }
-
+async function countUsage(workspaceId: string) {
+  const [devices, contacts, templates, autoReplyRules, chatbotFlows, messages] =
+    await Promise.all([
+      prisma.device.count({ where: { workspaceId } }),
+      prisma.contact.count({ where: { group: { workspaceId } } }),
+      prisma.messageTemplate.count({ where: { workspaceId } }),
+      prisma.autoReplyRule.count({ where: { workspaceId } }),
+      prisma.chatbotFlow.count({ where: { workspaceId } }),
+      getMessageUsage(workspaceId),
+    ]);
   return {
-    hasAccess: false,
-    isTrial: true,
-    isExpired: true,
-    daysRemaining: 0,
-    reason: "TRIAL_EXPIRED",
+    devices,
+    contacts,
+    templates,
+    autoReplyRules,
+    chatbotFlows,
+    messagesToday: messages.today,
+    messagesThisMonth: messages.thisMonth,
   };
 }
 
-export async function getBillingForWorkspace(
-  workspaceId: string,
-  userId?: string | null
-) {
-  let isAdmin = false;
-  if (userId) {
-    const u = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true },
-    });
-    if (u?.role === "ADMIN") {
-      isAdmin = true;
-    }
-  }
-  if (!isAdmin) {
-    const adminMember = await prisma.membership.findFirst({
-      where: {
-        workspaceId,
-        user: { role: "ADMIN" },
-      },
-    });
-    if (adminMember) {
-      isAdmin = true;
-    }
-  }
-
-  if (isAdmin) {
-    // Clear any leftover trial or expired state on admin workspace
-    await prisma.workspace.updateMany({
-      where: {
-        id: workspaceId,
-        OR: [
-          { trialUsed: true },
-          { subscriptionStatus: { in: ["trialing", "expired"] } },
-        ],
-      },
-      data: {
-        trialUsed: false,
-        trialStartedAt: null,
-        trialEndsAt: null,
-        subscriptionStatus: "active",
-      },
-    });
-
-    const ws = await prisma.workspace.findUnique({
+/** Billing snapshot for the dashboard: current plan, where it comes from, limits and usage. */
+export async function getBillingForWorkspace(workspaceId: string, userId?: string | null) {
+  await ensureTrialStarted(userId, workspaceId);
+  const now = new Date();
+  const [ent, ws, usage] = await Promise.all([
+    getEntitlements(workspaceId),
+    prisma.workspace.findUnique({
       where: { id: workspaceId },
       select: {
         plan: true,
         subscriptionStatus: true,
-        currentPeriodEnd: true,
+        billingMonths: true,
+        lifetimeTier: true,
         stripeCustomerId: true,
         stripeSubscriptionId: true,
         lastPaymentGateway: true,
+        trialUsed: true,
+        trialStartedAt: true,
+        trialEndsAt: true,
       },
-    });
-    if (!ws) {
-      throw new AppError(404, "Workspace not found", "NOT_FOUND");
-    }
+    }),
+    countUsage(workspaceId),
+  ]);
+  if (!ws) throw new AppError(404, "Workspace not found", "NOT_FOUND");
 
-    return {
-      planId: (ws.plan !== Plan.FREE ? planToApi(ws.plan) : "business") as PlanIdApi,
-      subscriptionStatus: "active",
-      currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
-      trialStartedAt: null,
-      trialEndsAt: null,
-      trialUsed: false,
-      isTrial: false,
-      isTrialExpired: false,
-      hasActiveSubscription: true,
-      daysRemaining: null,
-      stripeConfigured: isStripeKeyConfigured(),
-      stripePortalEligible: false,
-      paymentGateways: listPaymentGateways(),
-    };
-  }
-
-  await enforceSslCommerzPeriodExpiry(workspaceId);
-
-  // Sync trial on billing fetch for regular users
-  await ensureTrialStarted(userId, workspaceId);
-
-  const ws = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
-    select: {
-      plan: true,
-      subscriptionStatus: true,
-      currentPeriodEnd: true,
-      stripeCustomerId: true,
-      stripeSubscriptionId: true,
-      lastPaymentGateway: true,
-      trialUsed: true,
-      trialStartedAt: true,
-      trialEndsAt: true,
-    },
-  });
-  if (!ws) {
-    throw new AppError(404, "Workspace not found", "NOT_FOUND");
-  }
-
-  const now = new Date();
-  const isPaid = ws.plan !== Plan.FREE;
-  const isTrial = !isPaid;
-  const isTrialExpired = Boolean(
-    isTrial &&
-      (ws.trialUsed || ws.trialEndsAt) &&
-      (!ws.trialEndsAt || now > ws.trialEndsAt)
-  );
-
-  let hasActiveSubscription = false;
-  if (isPaid) {
-    hasActiveSubscription = Boolean(
-      (ws.subscriptionStatus && ACTIVE.has(ws.subscriptionStatus)) ||
-        ws.subscriptionStatus === "demo"
-    );
-  } else {
-    hasActiveSubscription = Boolean(
-      ws.trialEndsAt && now <= ws.trialEndsAt
-    );
-  }
-
-  let daysRemaining: number | null = null;
-  if (isTrial && ws.trialEndsAt && now <= ws.trialEndsAt) {
-    daysRemaining = Math.max(
-      1,
-      Math.ceil((ws.trialEndsAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
-    );
-  } else if (isPaid && ws.currentPeriodEnd && now <= ws.currentPeriodEnd) {
-    daysRemaining = Math.max(
-      0,
-      Math.ceil((ws.currentPeriodEnd.getTime() - now.getTime()) / (24 * 60 * 60 * 1000))
-    );
-  }
-
-  const stripePortalEligible = Boolean(
-    ws.stripeCustomerId &&
-      ws.lastPaymentGateway === "stripe" &&
-      ws.stripeSubscriptionId
-  );
+  const trialActive = ent.source === "trial";
+  const lifetimePlan = ws.lifetimeTier ? await getCatalogPlan(ws.lifetimeTier) : undefined;
+  const periodDays = daysUntil(ent.periodEnd, now);
+  const isPaidSource = ent.source === "paid" || ent.source === "grace" || ent.source === "lifetime";
 
   return {
-    planId: planToApi(ws.plan) as PlanIdApi,
-    subscriptionStatus: ws.subscriptionStatus,
-    currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
+    planId: ent.planId,
+    planName: ent.planName,
+    /** admin | paid | grace | lifetime | trial | free */
+    source: ent.source,
+    isLifetime: Boolean(ws.lifetimeTier),
+    lifetimePlanId: ws.lifetimeTier ? planToApi(ws.lifetimeTier) : null,
+    lifetimePlanName: lifetimePlan?.name ?? null,
+    billingMonths: ws.billingMonths,
+    subscriptionStatus: ent.source === "grace" ? "grace" : ws.subscriptionStatus,
+    currentPeriodEnd: ent.periodEnd?.toISOString() ?? null,
+    graceEndsAt: ent.source === "grace" ? ent.graceEndsAt?.toISOString() ?? null : null,
+    inGrace: ent.source === "grace",
+    trial: {
+      active: trialActive,
+      endsAt: ws.trialEndsAt?.toISOString() ?? null,
+      daysRemaining: trialActive ? daysUntil(ws.trialEndsAt, now) : 0,
+    },
+    limits: ent.limits,
+    usage,
+
+    // Fields kept for older clients.
     trialStartedAt: ws.trialStartedAt?.toISOString() ?? null,
     trialEndsAt: ws.trialEndsAt?.toISOString() ?? null,
     trialUsed: ws.trialUsed,
-    isTrial,
-    isTrialExpired,
-    hasActiveSubscription,
-    daysRemaining,
+    isTrial: trialActive,
+    isTrialExpired: false,
+    hasActiveSubscription: true,
+    daysRemaining: trialActive ? daysUntil(ws.trialEndsAt, now) : isPaidSource ? periodDays : null,
     stripeConfigured: isStripeKeyConfigured(),
-    stripePortalEligible,
+    stripePortalEligible: Boolean(
+      ws.stripeCustomerId && ws.lastPaymentGateway === "stripe" && ws.stripeSubscriptionId
+    ),
     paymentGateways: listPaymentGateways(),
   };
 }
 
 /**
- * Opens Stripe Customer Portal (cancel, payment method, invoices) for workspaces
- * that subscribed through Stripe checkout.
+ * Opens Stripe Customer Portal for workspaces still on a legacy Stripe subscription.
  */
 export async function createStripeCustomerPortalSession(
   workspaceId: string
@@ -447,11 +182,7 @@ export async function createStripeCustomerPortalSession(
 
   const ws = await prisma.workspace.findUnique({
     where: { id: workspaceId },
-    select: {
-      stripeCustomerId: true,
-      lastPaymentGateway: true,
-      stripeSubscriptionId: true,
-    },
+    select: { stripeCustomerId: true, lastPaymentGateway: true, stripeSubscriptionId: true },
   });
   if (!ws?.stripeCustomerId) {
     throw new AppError(
@@ -480,9 +211,7 @@ export async function createStripeCustomerPortalSession(
   } catch (e) {
     if (e instanceof AppError) throw e;
     const msg =
-      e instanceof Stripe.errors.StripeError
-        ? e.message
-        : "Could not open Stripe billing portal";
+      e instanceof Stripe.errors.StripeError ? e.message : "Could not open Stripe billing portal";
     console.error("[billing] stripe portal session", e);
     throw new AppError(
       502,
@@ -492,60 +221,45 @@ export async function createStripeCustomerPortalSession(
   }
 }
 
-export async function applyDemoPlan(
-  workspaceId: string,
-  planId: Exclude<PlanIdApi, "free">
-): Promise<PlanIdApi> {
-  const plan = apiPaidPlanToDb(planId);
-  await prisma.workspace.update({
-    where: { id: workspaceId },
-    data: {
-      plan,
-      subscriptionStatus: "demo",
-      stripeSubscriptionId: null,
-      currentPeriodEnd: null,
-      lastPaymentGateway: null,
-    },
-  });
-  return planId;
+/** Local development only: activates an invoice without a payment gateway. */
+export async function applyDemoInvoice(invoiceId: string): Promise<void> {
+  if (env.NODE_ENV === "production") {
+    throw new AppError(503, "No payment gateway is configured", "GATEWAY_NOT_CONFIGURED");
+  }
+  await applyPaidInvoice(invoiceId, "demo");
 }
 
+/**
+ * Drops a workspace back to Free. Refused while a paid period is still running.
+ */
 export async function resetWorkspaceToFree(workspaceId: string): Promise<void> {
   const ws = await prisma.workspace.findUnique({
     where: { id: workspaceId },
     select: {
       stripeSubscriptionId: true,
       subscriptionStatus: true,
-      lastPaymentGateway: true,
       plan: true,
       currentPeriodEnd: true,
+      lifetimeTier: true,
     },
   });
   if (!ws) {
     throw new AppError(404, "Workspace not found", "NOT_FOUND");
   }
-  if (
-    ws.stripeSubscriptionId &&
-    ws.subscriptionStatus &&
-    ACTIVE.has(ws.subscriptionStatus)
-  ) {
+  if (ws.stripeSubscriptionId && ws.subscriptionStatus && STRIPE_ACTIVE.has(ws.subscriptionStatus)) {
     throw new AppError(
       400,
       "Cancel your subscription in Stripe before downgrading here, or use the customer portal.",
       "SUBSCRIPTION_ACTIVE"
     );
   }
-  const now = new Date();
-  if (
-    ws.lastPaymentGateway === "sslcommerz" &&
-    ws.plan !== Plan.FREE &&
-    ws.currentPeriodEnd &&
-    ws.currentPeriodEnd > now &&
-    ws.subscriptionStatus === "active"
-  ) {
+  if (ws.lifetimeTier) {
+    throw new AppError(400, "Lifetime plans cannot be reset.", "LIFETIME_PLAN");
+  }
+  if (ws.plan !== Plan.FREE && ws.currentPeriodEnd && ws.currentPeriodEnd > new Date()) {
     throw new AppError(
       400,
-      "Your paid period through SSLCommerz is still active. Wait until it ends or contact support.",
+      "Your paid period is still active. It switches to Free automatically when it ends.",
       "PAID_PERIOD_ACTIVE"
     );
   }
@@ -556,56 +270,80 @@ export async function resetWorkspaceToFree(workspaceId: string): Promise<void> {
       subscriptionStatus: "expired",
       stripeSubscriptionId: null,
       currentPeriodEnd: null,
+      billingMonths: null,
       lastPaymentGateway: null,
       trialUsed: true,
+      trialEndsAt: new Date(),
     },
   });
+  invalidateEntitlements(workspaceId);
 }
 
+/**
+ * Confirms a Stripe Checkout session after the browser returns.
+ * One-time invoice payments activate the invoice; legacy subscription sessions sync the subscription.
+ */
 export async function confirmCheckoutSession(input: {
   workspaceId: string;
   sessionId: string;
 }): Promise<{ planId: PlanIdApi; demo: boolean }> {
   const stripe = getStripe();
   if (!stripe) {
-    const b = await getBillingForWorkspace(input.workspaceId);
-    return { planId: b.planId, demo: true };
+    throw new AppError(503, "Stripe is not configured", "STRIPE_NOT_CONFIGURED");
   }
 
   const session = await stripe.checkout.sessions.retrieve(input.sessionId, {
     expand: ["subscription"],
   });
 
-  if (session.client_reference_id !== input.workspaceId) {
-    const metaWs = session.metadata?.workspaceId;
-    if (metaWs !== input.workspaceId) {
-      throw new AppError(403, "Session does not belong to this workspace", "FORBIDDEN");
-    }
+  const sessionWs = session.client_reference_id ?? session.metadata?.workspaceId;
+  if (sessionWs !== input.workspaceId) {
+    throw new AppError(403, "Session does not belong to this workspace", "FORBIDDEN");
   }
-
   if (session.status !== "complete") {
     throw new AppError(400, "Checkout not complete", "CHECKOUT_INCOMPLETE");
   }
 
-  const subRaw = session.subscription;
-  const subscription =
-    typeof subRaw === "string"
-      ? await stripe.subscriptions.retrieve(subRaw)
-      : (subRaw as Stripe.Subscription | null);
-
-  if (!subscription) {
-    throw new AppError(400, "No subscription on session", "NO_SUBSCRIPTION");
+  if (session.mode === "payment") {
+    await fulfillStripePaymentSession(session);
+  } else {
+    const subRaw = session.subscription;
+    const subscription =
+      typeof subRaw === "string"
+        ? await stripe.subscriptions.retrieve(subRaw)
+        : (subRaw as Stripe.Subscription | null);
+    if (!subscription) {
+      throw new AppError(400, "No subscription on session", "NO_SUBSCRIPTION");
+    }
+    await syncWorkspaceFromSubscription(subscription);
   }
 
-  await syncWorkspaceFromSubscription(subscription);
-  const ws = await prisma.workspace.findUnique({
-    where: { id: input.workspaceId },
-    select: { plan: true },
+  const ent = await getEntitlements(input.workspaceId);
+  return { planId: ent.planId, demo: false };
+}
+
+/** Activates the invoice paid through a one-time Stripe Checkout session. */
+export async function fulfillStripePaymentSession(session: Stripe.Checkout.Session): Promise<void> {
+  const invoiceId = session.metadata?.invoiceId;
+  if (!invoiceId) {
+    throw new AppError(400, "Checkout session has no invoice", "NO_INVOICE");
+  }
+  if (session.payment_status !== "paid") {
+    throw new AppError(400, "Payment not completed", "PAYMENT_INCOMPLETE");
+  }
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId } });
+  if (!invoice || invoice.workspaceId !== (session.client_reference_id ?? session.metadata?.workspaceId)) {
+    throw new AppError(404, "Invoice not found", "NOT_FOUND");
+  }
+  const expectedCents = Number(session.metadata?.expectedAmountCents ?? NaN);
+  if (!Number.isFinite(expectedCents) || session.amount_total !== expectedCents) {
+    throw new AppError(400, "Amount mismatch", "AMOUNT_MISMATCH");
+  }
+  await prisma.paymentTransaction.updateMany({
+    where: { tranId: session.id, status: "pending" },
+    data: { status: "paid" },
   });
-  return {
-    planId: (ws ? planToApi(ws.plan) : "free") as PlanIdApi,
-    demo: false,
-  };
+  await applyPaidInvoice(invoice.id, "stripe");
 }
 
 export async function syncWorkspaceFromSubscription(
@@ -621,10 +359,7 @@ export async function syncWorkspaceFromSubscription(
     )?.id;
 
   if (!workspaceId) {
-    console.warn(
-      "[billing] subscription without workspace mapping",
-      subscription.id
-    );
+    console.warn("[billing] subscription without workspace mapping", subscription.id);
     return;
   }
 
@@ -632,16 +367,17 @@ export async function syncWorkspaceFromSubscription(
   const priceId = item?.price?.id;
   const stripe = getStripe();
   const mappedPlan =
-    priceId && stripe
-      ? await matchSubscriptionPriceToPlan(stripe, priceId)
-      : null;
+    priceId && stripe ? await matchSubscriptionPriceToPlan(stripe, priceId) : null;
+  const metaPlan = subscription.metadata?.planId;
   const plan =
     mappedPlan ??
-    (subscription.metadata?.planId === "business"
+    (metaPlan === "business"
       ? Plan.BUSINESS
-      : subscription.metadata?.planId === "pro"
+      : metaPlan === "pro"
         ? Plan.PRO
-        : null);
+        : metaPlan === "starter"
+          ? Plan.STARTER
+          : null);
 
   if (!plan) {
     console.warn("[billing] unknown price for subscription", subscription.id, priceId);
@@ -649,9 +385,7 @@ export async function syncWorkspaceFromSubscription(
   }
 
   const customerId =
-    typeof subscription.customer === "string"
-      ? subscription.customer
-      : subscription.customer?.id;
+    typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id;
 
   await prisma.workspace.update({
     where: { id: workspaceId },
@@ -661,33 +395,45 @@ export async function syncWorkspaceFromSubscription(
       stripeCustomerId: customerId ?? undefined,
       subscriptionStatus: subscription.status,
       currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+      billingMonths: 1,
       lastPaymentGateway: "stripe",
     },
   });
+  invalidateEntitlements(workspaceId);
 }
 
 export async function handleSubscriptionDeleted(
   subscription: Stripe.Subscription
 ): Promise<void> {
-  const workspaceId =
-    subscription.metadata?.workspaceId ??
-    (
-      await prisma.workspace.findFirst({
-        where: { stripeSubscriptionId: subscription.id },
-        select: { id: true },
-      })
-    )?.id;
-
-  if (!workspaceId) return;
+  const ws = await prisma.workspace.findFirst({
+    where: {
+      OR: [
+        ...(subscription.metadata?.workspaceId ? [{ id: subscription.metadata.workspaceId }] : []),
+        { stripeSubscriptionId: subscription.id },
+      ],
+    },
+    select: { id: true, lifetimeTier: true },
+  });
+  if (!ws) return;
 
   await prisma.workspace.update({
-    where: { id: workspaceId },
-    data: {
-      plan: Plan.FREE,
-      stripeSubscriptionId: null,
-      subscriptionStatus: "canceled",
-      currentPeriodEnd: null,
-      lastPaymentGateway: null,
-    },
+    where: { id: ws.id },
+    data: ws.lifetimeTier
+      ? {
+          plan: ws.lifetimeTier,
+          stripeSubscriptionId: null,
+          subscriptionStatus: "active",
+          currentPeriodEnd: null,
+          billingMonths: 0,
+        }
+      : {
+          plan: Plan.FREE,
+          stripeSubscriptionId: null,
+          subscriptionStatus: "canceled",
+          currentPeriodEnd: null,
+          billingMonths: null,
+          lastPaymentGateway: null,
+        },
   });
+  invalidateEntitlements(ws.id);
 }

@@ -5,6 +5,7 @@ import {
   type AiCredential,
   LiveChatMessageDirection,
 } from "@prisma/client";
+import { hasFeature } from "../billing/entitlements.service";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 import type { proto, WASocket, WAMessage } from "@whiskeysockets/baileys";
 import {
@@ -893,7 +894,7 @@ export async function dispatchAutoRepliesForInbound(
     return;
   }
 
-  const rules = await prisma.autoReplyRule.findMany({
+  const allRules = await prisma.autoReplyRule.findMany({
     where: { workspaceId, deviceId, active: true },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
     include: {
@@ -905,6 +906,12 @@ export async function dispatchAutoRepliesForInbound(
       },
     },
   });
+
+  // AI rules only run on plans that include AI (they pause, not delete, after a downgrade).
+  const aiAllowed = allRules.some((r) => r.aiSkill || r.openAiEnabled)
+    ? await hasFeature(workspaceId, "ai")
+    : true;
+  const rules = aiAllowed ? allRules : allRules.filter((r) => !r.aiSkill && !r.openAiEnabled);
 
   if (rules.length === 0) {
     return;

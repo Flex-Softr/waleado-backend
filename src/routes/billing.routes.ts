@@ -6,15 +6,34 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { initiatePaidCheckout } from "../payments/checkout.facade";
 import type { PaymentGatewayId } from "../payments/types";
 import * as billing from "../services/billing.service";
+import { apiPlanToDb, PAID_PLAN_ID_VALUES } from "../lib/plan-mapping";
+import { getPublicPricing } from "../billing/catalog.service";
+import {
+  createInvoiceFromQuote,
+  getWorkspaceInvoice,
+  listWorkspaceInvoices,
+  quotePurchase,
+  serializeInvoice,
+} from "../billing/invoices.service";
 
 const router = Router();
 router.use(requireAuth);
 
-const checkoutBody = z.object({
-  planId: z.enum(["pro", "business"]),
+const purchaseBody = z.object({
+  planId: z.enum(PAID_PLAN_ID_VALUES),
+  /** Billing cycle in months; 0 = lifetime. */
+  months: z.coerce.number().int().min(0).max(60).default(1),
+});
+
+const checkoutBody = purchaseBody.extend({
   gateway: z.enum(["stripe", "sslcommerz"]).default("sslcommerz"),
   customerPhone: z.string().max(32).optional(),
 });
+
+function serializeQuote(q: Awaited<ReturnType<typeof quotePurchase>>) {
+  const { price: _price, tier: _tier, ...rest } = q;
+  return rest;
+}
 
 function asyncHandler(
   fn: (req: AuthedRequest, res: import("express").Response) => Promise<void>
@@ -40,6 +59,26 @@ router.get(
   })
 );
 
+router.get(
+  "/pricing",
+  asyncHandler(async (_req, res) => {
+    res.json(await getPublicPricing());
+  })
+);
+
+router.post(
+  "/quote",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const body = purchaseBody.parse(req.body);
+    const quote = await quotePurchase(auth.wid, apiPlanToDb(body.planId), body.months);
+    res.json(serializeQuote(quote));
+  })
+);
+
 router.post(
   "/checkout",
   asyncHandler(async (req, res) => {
@@ -56,6 +95,8 @@ router.post(
       throw new AppError(404, "User not found", "NOT_FOUND");
     }
     const gateway = body.gateway as PaymentGatewayId;
+    const quote = await quotePurchase(auth.wid, apiPlanToDb(body.planId), body.months);
+    const invoice = await createInvoiceFromQuote(auth.wid, quote, gateway);
     const customerPhone =
       body.customerPhone?.trim() ||
       user.phone ||
@@ -65,13 +106,41 @@ router.post(
       userEmail: user.email,
       userName: user.name,
       customerPhone,
+      invoiceId: invoice.id,
       planId: body.planId,
+      amount: quote.total,
+      currency: quote.currency,
+      amountUsd: quote.amountUsd,
+      description: quote.description,
     });
-    if (result.kind === "demo") {
-      res.json({ demo: true, planId: result.planId });
+    if (result.kind === "activated") {
+      res.json({ activated: true, invoice: serializeInvoice(invoice) });
       return;
     }
-    res.json({ url: result.url, gateway });
+    res.json({ url: result.url, gateway, invoice: serializeInvoice(invoice) });
+  })
+);
+
+router.get(
+  "/invoices",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    res.json({ invoices: await listWorkspaceInvoices(auth.wid) });
+  })
+);
+
+router.get(
+  "/invoices/:id",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) {
+      throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    }
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    res.json({ invoice: await getWorkspaceInvoice(auth.wid, id) });
   })
 );
 

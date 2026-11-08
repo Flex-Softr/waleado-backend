@@ -4,6 +4,14 @@ import { AppError } from "../lib/errors";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { requirePlatformAdmin } from "../middleware/require-platform-admin";
 import * as admin from "../services/admin.service";
+import { PLAN_ID_VALUES } from "../lib/plan-mapping";
+import {
+  adminBillingUpdateSchema,
+  getAdminBillingConfig,
+  getAdminBillingStats,
+  listAdminInvoices,
+  updateAdminBillingConfig,
+} from "../billing/admin-billing.service";
 
 const router = Router();
 router.use(requireAuth);
@@ -164,7 +172,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const query = listQuery
       .extend({
-        plan: z.enum(["free", "pro", "business"]).optional(),
+        plan: z.enum(PLAN_ID_VALUES).optional(),
         excludeAdmin: z.coerce.boolean().optional(),
       })
       .parse(req.query);
@@ -181,9 +189,11 @@ router.patch(
       .parse(req.params);
     const body = z
       .object({
-        plan: z.enum(["free", "pro", "business"]),
+        plan: z.enum(PLAN_ID_VALUES),
         subscriptionStatus: z.string().max(64).nullable().optional(),
         currentPeriodEnd: z.string().datetime().nullable().optional(),
+        /** Grant the plan for life (sets the lifetime tier). */
+        lifetime: z.boolean().optional(),
       })
       .parse(req.body);
     const subscription = await admin.updateAdminSubscription({
@@ -232,6 +242,49 @@ router.post(
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const result = await admin.rejectAdminPayment(id);
     res.json(result);
+  })
+);
+
+// ---------------------------------------------------------------------------
+// Billing configuration: packages, prices, trial/grace settings
+// ---------------------------------------------------------------------------
+
+router.get(
+  "/billing/config",
+  asyncHandler(async (_req, res) => {
+    res.json(await getAdminBillingConfig());
+  })
+);
+
+router.put(
+  "/billing/config",
+  asyncHandler(async (req, res) => {
+    const body = adminBillingUpdateSchema.parse(req.body);
+    res.json(await updateAdminBillingConfig(body));
+  })
+);
+
+router.get(
+  "/billing/stats",
+  asyncHandler(async (_req, res) => {
+    res.json(await getAdminBillingStats());
+  })
+);
+
+router.get(
+  "/billing/invoices",
+  asyncHandler(async (req, res) => {
+    const query = listQuery
+      .extend({ status: z.enum(["unpaid", "paid", "cancelled"]).optional() })
+      .parse(req.query);
+    res.json(
+      await listAdminInvoices({
+        page: query.page ?? 1,
+        pageSize: query.pageSize ?? 20,
+        status: query.status,
+        q: query.q,
+      })
+    );
   })
 );
 

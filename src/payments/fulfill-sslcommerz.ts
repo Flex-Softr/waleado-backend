@@ -1,10 +1,9 @@
-import { NotificationAudience, NotificationType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
-import { env } from "../env";
-import { apiPaidPlanToDb, planToApi, type PlanIdApi } from "../lib/plan-mapping";
+import { apiPlanToDb, planToApi, type PlanIdApi } from "../lib/plan-mapping";
+import { applyPaidInvoice, INVOICE_CURRENCY } from "../billing/invoices.service";
+import { getEntitlements } from "../billing/entitlements.service";
 import * as sslApi from "./sslcommerz/sslcommerz-api";
-import { createNotification } from "../services/notifications.service";
 
 const PAID_STATUSES = new Set(["VALID", "VALIDATED"]);
 
@@ -13,8 +12,44 @@ function amountsRoughlyEqual(a: number, b: number): boolean {
 }
 
 /**
- * Confirms payment with SSLCommerz validation API and upgrades the workspace plan.
- * Idempotent: if the transaction row is already `paid`, returns without error.
+ * Transactions created before invoices existed have no invoice: create a matching
+ * one-month invoice so the payment is applied through the same path.
+ */
+async function ensureInvoiceForLegacyTransaction(row: {
+  id: string;
+  workspaceId: string;
+  planId: string;
+  amount: unknown;
+  currency: string;
+  invoiceId: string | null;
+}): Promise<string> {
+  if (row.invoiceId) return row.invoiceId;
+  const tier = apiPlanToDb(row.planId as PlanIdApi);
+  const amount = Number(row.amount);
+  const seq = await prisma.$queryRaw<{ n: bigint }[]>`SELECT nextval('invoice_number_seq') AS n`;
+  const number = `WLD-${new Date().getUTCFullYear()}-${String(Number(seq[0]?.n)).padStart(6, "0")}`;
+  const invoice = await prisma.invoice.create({
+    data: {
+      number,
+      workspaceId: row.workspaceId,
+      tier,
+      months: 1,
+      kind: "new",
+      subtotal: amount,
+      credit: 0,
+      total: amount,
+      currency: row.currency || INVOICE_CURRENCY,
+      gateway: "sslcommerz",
+      description: `Waleado ${row.planId} — 1 month`,
+    },
+  });
+  await prisma.paymentTransaction.update({ where: { id: row.id }, data: { invoiceId: invoice.id } });
+  return invoice.id;
+}
+
+/**
+ * Confirms payment with the SSLCommerz validation API, then applies the invoice.
+ * Idempotent: a transaction already marked paid is not applied twice.
  */
 export async function fulfillSslCommerzByValId(input: {
   tranId: string;
@@ -27,11 +62,8 @@ export async function fulfillSslCommerzByValId(input: {
     throw new AppError(404, "Unknown transaction", "TRANSACTION_NOT_FOUND");
   }
   if (row.status === "paid") {
-    const ws = await prisma.workspace.findUnique({
-      where: { id: row.workspaceId },
-      select: { plan: true },
-    });
-    return { planId: ws ? planToApi(ws.plan) : "free" };
+    const ent = await getEntitlements(row.workspaceId);
+    return { planId: ent.planId };
   }
 
   const validated = await sslApi.validateTransaction(input.valId);
@@ -55,77 +87,17 @@ export async function fulfillSslCommerzByValId(input: {
     throw new AppError(400, "Currency mismatch", "CURRENCY_MISMATCH");
   }
 
-  const plan = apiPaidPlanToDb(row.planId as Exclude<PlanIdApi, "free">);
-  const periodEnd = new Date();
-  periodEnd.setDate(periodEnd.getDate() + 30);
+  // Apply first (idempotent per invoice), then record the transaction as paid,
+  // so a failure in between can be retried by the IPN or the admin "verify" action.
+  const invoiceId = await ensureInvoiceForLegacyTransaction(row);
+  await applyPaidInvoice(invoiceId, "sslcommerz");
+  await prisma.paymentTransaction.updateMany({
+    where: { id: row.id, status: { not: "paid" } },
+    data: { status: "paid", valId: input.valId },
+  });
 
-  await prisma.$transaction([
-    prisma.workspace.update({
-      where: { id: row.workspaceId },
-      data: {
-        plan,
-        lastPaymentGateway: "sslcommerz",
-        subscriptionStatus: "active",
-        currentPeriodEnd: periodEnd,
-        stripeCustomerId: null,
-        stripeSubscriptionId: null,
-      },
-    }),
-    prisma.paymentTransaction.update({
-      where: { id: row.id },
-      data: {
-        status: "paid",
-        valId: input.valId,
-      },
-    }),
-  ]);
-
-  void (async () => {
-    try {
-      const ws = await prisma.workspace.findUnique({
-        where: { id: row.workspaceId },
-        select: { name: true },
-      });
-      const wsName = ws?.name ?? "Workspace";
-
-      // Admin alert: new payment received
-      await createNotification({
-        audience: NotificationAudience.ADMIN,
-        type: NotificationType.PAYMENT_RECEIVED,
-        title: `Payment Received: ${row.currency} ${Number(row.amount).toFixed(2)}`,
-        message: `SSLCommerz payment confirmed for workspace "${wsName}" (${row.planId.toUpperCase()} Plan, Tran ID: ${row.tranId}).`,
-        link: "/admin/billing",
-        metadata: {
-          tranId: row.tranId,
-          amount: Number(row.amount),
-          currency: row.currency,
-          gateway: "sslcommerz",
-          planId: row.planId,
-          workspaceId: row.workspaceId,
-        },
-      });
-
-      // Customer alert: payment received & upgraded
-      await createNotification({
-        audience: NotificationAudience.CUSTOMER,
-        workspaceId: row.workspaceId,
-        type: NotificationType.PAYMENT_RECEIVED,
-        title: `Payment Confirmed: ${row.planId.toUpperCase()} Plan`,
-        message: `Your payment of ${row.currency} ${Number(row.amount).toFixed(2)} was received successfully. Your plan is now active!`,
-        link: "/billing",
-        metadata: {
-          tranId: row.tranId,
-          amount: Number(row.amount),
-          currency: row.currency,
-          gateway: "sslcommerz",
-        },
-      });
-    } catch (e) {
-      console.warn("[sslcommerz] payment notification creation failed:", e);
-    }
-  })();
-
-  return { planId: row.planId as PlanIdApi };
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { tier: true } });
+  return { planId: invoice ? planToApi(invoice.tier) : "free" };
 }
 
 export async function markTransactionFailed(tranId: string): Promise<void> {
@@ -140,26 +112,4 @@ export async function markTransactionCancelled(tranId: string): Promise<void> {
     where: { tranId, status: "pending" },
     data: { status: "cancelled" },
   });
-}
-
-export function planAmount(plan: Exclude<PlanIdApi, "free">): { amount: string; currency: string } {
-  const currency = env.SSLCOMMERZ_CURRENCY.trim().toUpperCase();
-  const raw =
-    plan === "pro" ? env.SSLCOMMERZ_PRO_AMOUNT : env.SSLCOMMERZ_BUSINESS_AMOUNT;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0.5) {
-    throw new AppError(
-      500,
-      "Invalid SSLCOMMERZ plan amount in environment",
-      "SSLCOMMERZ_CONFIG"
-    );
-  }
-
-  const rate = env.CONVERSION_RATE_USD_TO_BDT;
-  if (rate != null && Number.isFinite(rate) && rate > 0) {
-    const charge = n * rate;
-    return { amount: charge.toFixed(2), currency: "BDT" };
-  }
-
-  return { amount: n.toFixed(2), currency };
 }

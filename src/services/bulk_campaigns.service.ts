@@ -45,8 +45,14 @@ import {
   WA_DEVICE_DAILY_SEND_CAP,
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
-import { maxBulkMessageContentsForPlan } from "../lib/plan-limits";
-import { enforceSslCommerzPeriodExpiry } from "./billing.service";
+import {
+  assertCountLimit,
+  assertFeature,
+  assertMessageQuota,
+  getEntitlements,
+  MessageQuotaExceededError,
+} from "../billing/entitlements.service";
+import { getBillingSettings } from "../billing/catalog.service";
 import {
   generateAiRewriteVariants,
   normalizeBodyTexts,
@@ -1663,16 +1669,12 @@ export async function createBulkCampaign(
       throw new AppError(400, "Message text is required", "VALIDATION");
     }
 
-    await enforceSslCommerzPeriodExpiry(workspaceId);
-    const workspace = await prisma.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { plan: true },
-    });
-    if (!workspace) {
-      throw new AppError(404, "Workspace not found", "NOT_FOUND");
-    }
-    const maxContents = maxBulkMessageContentsForPlan(workspace.plan);
+    const entitlements = await getEntitlements(workspaceId);
+    const maxContents = entitlements.limits.bulkMessageVariants;
     const aiEnabled = payload.aiRewrite?.enabled === true;
+    if (aiEnabled) {
+      await assertFeature(workspaceId, "ai");
+    }
     const aiCount = aiEnabled
       ? Math.floor(Number(payload.aiRewrite?.count))
       : 0;
@@ -1693,8 +1695,9 @@ export async function createBulkCampaign(
     if (customTexts.length + Math.max(0, aiCount) > maxContents) {
       throw new AppError(
         403,
-        `Your plan allows up to ${maxContents} message content(s) per bulk campaign (custom + AI). Upgrade billing to add more.`,
-        "PLAN_BULK_MESSAGE_CONTENT_LIMIT"
+        `Your ${entitlements.planName} plan allows up to ${maxContents} message variation(s) per campaign (custom + AI). Upgrade to add more.`,
+        "PLAN_LIMIT_REACHED",
+        { limit: "bulkMessageVariants", label: "message variations", max: maxContents, currentPlan: entitlements.planId }
       );
     }
 
@@ -1733,6 +1736,12 @@ export async function createBulkCampaign(
     const tpl = await requireActiveTemplate(workspaceId, payload.templateId);
     templateId = tpl.id;
     kind = OutboundKind.TEMPLATE;
+  }
+
+  // Plan limits: recipients per campaign and scheduling.
+  await assertCountLimit(workspaceId, "bulkRecipientsPerCampaign", 0, phones.length);
+  if (scheduleType !== BulkScheduleType.IMMEDIATE) {
+    await assertFeature(workspaceId, "bulkScheduling");
   }
 
   const deviceIdsJson = payload.deviceIds as unknown as Prisma.InputJsonValue;
@@ -1856,6 +1865,7 @@ export async function createBulkCampaign(
             status:
               result.stoppedByFailLimit ||
               result.stoppedByDailyCap ||
+              result.stoppedByPlanQuota ||
               pendingLeft > 0
                 ? BulkCampaignStatus.PAUSED
                 : BulkCampaignStatus.COMPLETED,
@@ -1933,10 +1943,19 @@ async function countPendingCampaignRecipients(
   });
 }
 
+async function bulkBrandingFooter(workspaceId: string): Promise<string | null> {
+  const ent = await getEntitlements(workspaceId);
+  if (ent.limits.features.removeBranding) return null;
+  const footer = (await getBillingSettings()).brandingFooter?.trim();
+  return footer ? footer : null;
+}
+
 type ExecuteCampaignResult = {
   dispatched: number;
   stoppedByFailLimit: boolean;
   stoppedByDailyCap: boolean;
+  /** Paused because the workspace used up its plan's message quota. */
+  stoppedByPlanQuota?: boolean;
 };
 
 async function markFilteredOutRecipientsSkipped(
@@ -2031,6 +2050,8 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
   let dispatched = 0;
   let consecutiveFailures = 0;
   let stoppedByDailyCap = false;
+  // Free-plan branding footer (empty when the plan removes branding or the admin cleared it).
+  const brandingFooter = await bulkBrandingFooter(workspaceId);
 
   // Final gate: only VERIFIED contacts may be sent; others become SKIPPED.
   const verifiedPhones = await filterVerifiedFromContacts(workspaceId, phones);
@@ -2176,6 +2197,14 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
     if (shouldStopByFailLimit(consecutiveFailures, antiBlock)) {
       return { dispatched, stoppedByFailLimit: true, stoppedByDailyCap };
     }
+    try {
+      await assertMessageQuota(workspaceId, 1);
+    } catch (e) {
+      if (e instanceof MessageQuotaExceededError) {
+        return { dispatched, stoppedByFailLimit: false, stoppedByDailyCap, stoppedByPlanQuota: true };
+      }
+      throw e;
+    }
 
     const recipient = pendingRecipients[i]!;
     const toPhone = recipient.phone;
@@ -2203,12 +2232,14 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
       kind === OutboundKind.TEXT
         ? pickBodyTextForRecipient(messagePool, i, variantRotationOffset)
         : "";
-    const personalizedText =
+    const spunText =
       kind === OutboundKind.TEXT
         ? antiBlock.enabled && antiBlock.spintaxEnabled
           ? applySpintax(pickedText)
           : pickedText
         : null;
+    const personalizedText =
+      spunText !== null && brandingFooter ? `${spunText}\n\n${brandingFooter}` : spunText;
 
     const row = await prisma.outboundMessage.create({
       data: {
@@ -2494,6 +2525,7 @@ async function processSingleCampaign(campaign: BulkCampaign): Promise<void> {
     const finalStatus =
       result.stoppedByFailLimit ||
       result.stoppedByDailyCap ||
+      result.stoppedByPlanQuota ||
       pendingLeft > 0
         ? BulkCampaignStatus.PAUSED
         : BulkCampaignStatus.COMPLETED;
@@ -2516,6 +2548,16 @@ async function processSingleCampaign(campaign: BulkCampaign): Promise<void> {
           campaignName: campaign.name,
           dispatched: result.dispatched,
         },
+      });
+    } else if (result.stoppedByPlanQuota) {
+      await createNotification({
+        audience: NotificationAudience.CUSTOMER,
+        workspaceId: campaign.workspaceId,
+        type: NotificationType.CAMPAIGN_PAUSED,
+        title: `Campaign Paused (Plan Limit): ${campaign.name}`,
+        message: `Paused automatically: your plan's message limit is used up. Resume after it resets, or upgrade your plan to continue now.`,
+        link: `/billing`,
+        metadata: { campaignId: campaign.id, reason: "PLAN_QUOTA" },
       });
     } else if (result.stoppedByDailyCap) {
       await createNotification({

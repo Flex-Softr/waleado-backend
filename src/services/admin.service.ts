@@ -4,7 +4,9 @@ import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { hashPassword } from "../lib/password";
 import { validateAndFormatPhone } from "../lib/phone";
-import { planToApi, apiPaidPlanToDb, type PlanIdApi } from "../lib/plan-mapping";
+import { planToApi, apiPlanToDb, type PlanIdApi } from "../lib/plan-mapping";
+import { invalidateEntitlements } from "../billing/entitlements.service";
+import { applyPaidInvoice } from "../billing/invoices.service";
 import { fulfillSslCommerzByValId } from "../payments/fulfill-sslcommerz";
 
 const PAGE_SIZE_DEFAULT = 20;
@@ -587,12 +589,7 @@ export async function listAdminSubscriptions(input: {
     };
   }
   if (input.plan) {
-    where.plan =
-      input.plan === "free"
-        ? Plan.FREE
-        : input.plan === "pro"
-          ? Plan.PRO
-          : Plan.BUSINESS;
+    where.plan = apiPlanToDb(input.plan);
   }
   if (q) {
     where.OR = [
@@ -631,6 +628,8 @@ export async function listAdminSubscriptions(input: {
         lastPaymentGateway: true,
         stripeCustomerId: true,
         stripeSubscriptionId: true,
+        lifetimeTier: true,
+        billingMonths: true,
         createdAt: true,
         updatedAt: true,
         memberships: {
@@ -657,6 +656,8 @@ export async function listAdminSubscriptions(input: {
         name: ws.name,
         slug: ws.slug,
         plan: planToApi(ws.plan),
+        lifetimePlan: ws.lifetimeTier ? planToApi(ws.lifetimeTier) : null,
+        billingMonths: ws.billingMonths,
         subscriptionStatus: ws.subscriptionStatus,
         currentPeriodEnd: ws.currentPeriodEnd?.toISOString() ?? null,
         lastPaymentGateway: ws.lastPaymentGateway,
@@ -683,6 +684,7 @@ export async function updateAdminSubscription(input: {
   plan: PlanIdApi;
   subscriptionStatus?: string | null;
   currentPeriodEnd?: string | null;
+  lifetime?: boolean;
 }) {
   const ws = await prisma.workspace.findUnique({
     where: { id: input.workspaceId },
@@ -703,36 +705,33 @@ export async function updateAdminSubscription(input: {
     periodEnd = d;
   }
 
-  const plan =
-    input.plan === "free"
-      ? Plan.FREE
-      : apiPaidPlanToDb(input.plan);
-
-  const data: Prisma.WorkspaceUpdateInput = {
-    plan,
-  };
-
-  if (input.subscriptionStatus !== undefined) {
-    data.subscriptionStatus = input.subscriptionStatus;
-  } else if (input.plan === "free") {
-    data.subscriptionStatus = null;
-  } else {
-    data.subscriptionStatus = "active";
-  }
-
-  if (periodEnd !== undefined) {
-    data.currentPeriodEnd = periodEnd;
-  } else if (input.plan === "free") {
-    data.currentPeriodEnd = null;
-  } else {
-    const end = new Date();
-    end.setDate(end.getDate() + 30);
-    data.currentPeriodEnd = end;
-  }
+  const plan = apiPlanToDb(input.plan);
+  const data: Prisma.WorkspaceUpdateInput = { plan };
 
   if (input.plan === "free") {
+    // Free clears everything, including a lifetime grant.
+    data.subscriptionStatus = input.subscriptionStatus ?? null;
+    data.currentPeriodEnd = null;
+    data.billingMonths = null;
+    data.lifetimeTier = null;
     data.lastPaymentGateway = null;
     data.stripeSubscriptionId = null;
+  } else if (input.lifetime) {
+    data.lifetimeTier = plan;
+    data.subscriptionStatus = "active";
+    data.currentPeriodEnd = null;
+    data.billingMonths = 0;
+  } else {
+    data.subscriptionStatus =
+      input.subscriptionStatus !== undefined ? input.subscriptionStatus : "active";
+    if (periodEnd !== undefined) {
+      data.currentPeriodEnd = periodEnd;
+    } else {
+      const end = new Date();
+      end.setDate(end.getDate() + 30);
+      data.currentPeriodEnd = end;
+      data.billingMonths = 1;
+    }
   }
 
   const updated = await prisma.workspace.update({
@@ -748,6 +747,8 @@ export async function updateAdminSubscription(input: {
       lastPaymentGateway: true,
       stripeCustomerId: true,
       stripeSubscriptionId: true,
+      lifetimeTier: true,
+      billingMonths: true,
       createdAt: true,
       updatedAt: true,
       memberships: {
@@ -760,12 +761,15 @@ export async function updateAdminSubscription(input: {
     },
   });
 
+  invalidateEntitlements(updated.id);
   const owner = updated.memberships[0]?.user ?? null;
   return {
     workspaceId: updated.id,
     name: updated.name,
     slug: updated.slug,
     plan: planToApi(updated.plan),
+    lifetimePlan: updated.lifetimeTier ? planToApi(updated.lifetimeTier) : null,
+    billingMonths: updated.billingMonths,
     subscriptionStatus: updated.subscriptionStatus,
     currentPeriodEnd: updated.currentPeriodEnd?.toISOString() ?? null,
     lastPaymentGateway: updated.lastPaymentGateway,
@@ -899,27 +903,19 @@ export async function verifyAdminPayment(input: {
     return { id: row.id, status: "paid" as const, alreadyPaid: false };
   }
 
-  const plan = apiPaidPlanToDb(row.planId as Exclude<PlanIdApi, "free">);
-  const periodEnd = new Date();
-  periodEnd.setDate(periodEnd.getDate() + 30);
-
-  await prisma.$transaction([
-    prisma.workspace.update({
-      where: { id: row.workspaceId },
-      data: {
-        plan,
-        lastPaymentGateway: row.gateway,
-        subscriptionStatus: "active",
-        currentPeriodEnd: periodEnd,
-        stripeCustomerId: null,
-        stripeSubscriptionId: null,
-      },
-    }),
-    prisma.paymentTransaction.update({
-      where: { id: row.id },
-      data: { status: "paid" },
-    }),
-  ]);
+  // Manual confirmation by an admin: apply the invoice the payment belongs to.
+  if (!row.invoiceId) {
+    throw new AppError(
+      400,
+      "This payment has no invoice attached; set the plan from Subscriptions instead.",
+      "NO_INVOICE"
+    );
+  }
+  await applyPaidInvoice(row.invoiceId, row.gateway);
+  await prisma.paymentTransaction.update({
+    where: { id: row.id },
+    data: { status: "paid" },
+  });
 
   return { id: row.id, status: "paid" as const, alreadyPaid: false };
 }

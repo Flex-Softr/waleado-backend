@@ -13,7 +13,7 @@ import { validateAndFormatPhone } from "../lib/phone";
 import { env } from "../env";
 import { randomUUID } from "crypto";
 import { sendPasswordResetEmail } from "./mail.service";
-import { ensureTrialStarted, TRIAL_DURATION_MS } from "./billing.service";
+import { currentTrialDurationMs, ensureTrialStarted } from "./billing.service";
 
 export type SafeUser = {
   id: string;
@@ -151,7 +151,7 @@ export async function registerUser(input: {
     : "My workspace";
 
   const now = new Date();
-  const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
+  const trialEndsAt = new Date(now.getTime() + (await currentTrialDurationMs()));
 
   const user = await prisma.$transaction(async (tx) => {
     const u = await tx.user.create({
@@ -172,8 +172,7 @@ export async function registerUser(input: {
         trialUsed: true,
         trialStartedAt: now,
         trialEndsAt,
-        subscriptionStatus: "trialing",
-      },
+              },
     });
     await tx.membership.create({
       data: {
@@ -353,7 +352,7 @@ export async function signInOrRegisterGoogleUser(input: {
       : "My workspace";
 
     const now = new Date();
-    const trialEndsAt = new Date(now.getTime() + TRIAL_DURATION_MS);
+    const trialEndsAt = new Date(now.getTime() + (await currentTrialDurationMs()));
 
     user = await prisma.$transaction(async (tx) => {
       const u = await tx.user.create({
@@ -374,8 +373,7 @@ export async function signInOrRegisterGoogleUser(input: {
           trialUsed: true,
           trialStartedAt: now,
           trialEndsAt,
-          subscriptionStatus: "trialing",
-        },
+                  },
       });
       await tx.membership.create({
         data: {

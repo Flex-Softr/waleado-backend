@@ -5,6 +5,7 @@ import {
   OutboundKind,
   OutboundStatus,
 } from "@prisma/client";
+import { hasFeature } from "../billing/entitlements.service";
 import type {
   WACallEvent,
   WACallUpdateType,
@@ -456,6 +457,7 @@ export async function dispatchCallResponderRulesForCall(
   calls: WACallEvent[]
 ): Promise<void> {
   if (!env.WHATSAPP_BRIDGE_ENABLED || !calls?.length) return;
+  if (!(await hasFeature(workspaceId, "callResponder"))) return;
 
   const now = Date.now();
   pruneProcessedCalls(now);

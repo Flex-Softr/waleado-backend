@@ -3,6 +3,7 @@ import {
   AutoReplyTriggerType,
   Prisma,
 } from "@prisma/client";
+import { assertCountLimit, assertFeature } from "../billing/entitlements.service";
 import {
   parseAutoReplyKeywords,
   parseRegexPatterns,
@@ -271,6 +272,7 @@ export async function createAutoReplyRule(
   workspaceId: string,
   input: CreateAutoReplyRuleInput
 ): Promise<AutoReplyRuleJson> {
+  await assertCountLimit(workspaceId, "autoReplyRules", await prisma.autoReplyRule.count({ where: { workspaceId } }));
   const device = await prisma.device.findFirst({
     where: { id: input.deviceId, workspaceId },
   });
@@ -327,6 +329,9 @@ export async function createAutoReplyRule(
     aiSkillId,
   });
 
+  if (input.openAiEnabled || aiSkillId) {
+    await assertFeature(workspaceId, "ai");
+  }
   if (input.openAiEnabled && !aiSkillId) {
     await assertValidAiSettings(workspaceId, input.openAiSettings, {
       allowLegacyApiKey: true,
@@ -471,6 +476,9 @@ export async function updateAutoReplyRule(
       mediaAssetId === null
         ? { disconnect: true }
         : { connect: { id: mediaAssetId } };
+  }
+  if (input.openAiEnabled === true || (aiSkillId !== undefined && aiSkillId !== null)) {
+    await assertFeature(workspaceId, "ai");
   }
   if (aiSkillId !== undefined) {
     data.aiSkill =

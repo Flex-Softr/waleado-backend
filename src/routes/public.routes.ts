@@ -1,6 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import pino from "pino";
 import { z } from "zod";
+import { getPublicPricing } from "../billing/catalog.service";
 
 const log = pino({ name: "public" });
 
@@ -17,6 +18,16 @@ const complaintBodySchema = z.object({
 });
 
 const router = Router();
+
+/** Plans and prices for the landing page and other public pricing tables. */
+router.get("/pricing", async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.setHeader("Cache-Control", "public, max-age=60");
+    res.json(await getPublicPricing());
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.post("/complaints", (req: Request, res: Response, next: NextFunction) => {
   try {

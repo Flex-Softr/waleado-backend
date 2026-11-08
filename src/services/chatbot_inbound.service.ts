@@ -1,4 +1,5 @@
 import type { ChatbotFlow, ChatbotFlowNode, Prisma } from "@prisma/client";
+import { hasFeature } from "../billing/entitlements.service";
 import { LiveChatMessageDirection } from "@prisma/client";
 import type { proto, WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { prisma } from "../lib/prisma";
@@ -282,6 +283,8 @@ export async function dispatchChatbotFlowForInbound(
 ): Promise<Set<string>> {
   const handled = new Set<string>();
   if (messages.length === 0) return handled;
+  // Chatbot flows pause when the plan no longer includes them.
+  if (!(await hasFeature(workspaceId, "chatbot"))) return handled;
 
   const flows = await prisma.chatbotFlow.findMany({
     where: { workspaceId, deviceId, active: true },
@@ -330,7 +333,7 @@ export async function dispatchChatbotFlowForInbound(
 
     let sentAny = false;
 
-    if (flow.aiEnabled && flow.aiSettings) {
+    if (flow.aiEnabled && flow.aiSettings && (await hasFeature(workspaceId, "ai"))) {
       try {
         const resolved = await resolveAiSettingsToOpenAiInput(
           workspaceId,

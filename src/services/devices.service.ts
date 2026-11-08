@@ -3,7 +3,7 @@ import { DeviceStatus, Plan } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { env } from "../env";
-import { enforceSslCommerzPeriodExpiry } from "./billing.service";
+import { assertCountLimit } from "../billing/entitlements.service";
 import * as waSession from "./wa-device-session.service";
 
 export type DeviceJson = {
@@ -28,19 +28,6 @@ export type DeviceLinkStateJson = {
 };
 
 const DEMO_PHONE = "+917261902348";
-
-function maxDevicesForPlan(plan: Plan): number {
-  switch (plan) {
-    case Plan.FREE:
-      return 1;
-    case Plan.PRO:
-      return 5;
-    case Plan.BUSINESS:
-      return 100;
-    default:
-      return 1;
-  }
-}
 
 function newSessionId(): string {
   return `sess_${randomBytes(18).toString("base64url")}`;
@@ -126,24 +113,8 @@ export async function createDevice(
     throw new AppError(400, "Device name is required", "VALIDATION");
   }
 
-  await enforceSslCommerzPeriodExpiry(workspaceId);
-  const workspace = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
-    select: { plan: true },
-  });
-  if (!workspace) {
-    throw new AppError(404, "Workspace not found", "NOT_FOUND");
-  }
-
   const count = await prisma.device.count({ where: { workspaceId } });
-  const max = maxDevicesForPlan(workspace.plan);
-  if (count >= max) {
-    throw new AppError(
-      403,
-      `Your plan allows up to ${max} device(s). Upgrade billing to add more.`,
-      "PLAN_DEVICE_LIMIT"
-    );
-  }
+  await assertCountLimit(workspaceId, "devices", count);
 
   const device = await prisma.device.create({
     data: {

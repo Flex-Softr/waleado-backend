@@ -23,7 +23,10 @@ import {
 } from "./ai-credentials.routes";
 import { aiSkillsRouter } from "./ai-skills.routes";
 import { notificationsRouter } from "./notifications.routes";
-import { requireActiveSubscription } from "../middleware/require-active-subscription";
+import {
+  requireActiveSubscription,
+  requireFeature,
+} from "../middleware/require-active-subscription";
 
 const apiRouter = Router();
 
@@ -36,7 +39,7 @@ apiRouter.use("/auth", authRouter);
 
 // Administration and Integrations
 apiRouter.use("/admin", adminRouter);
-apiRouter.use("/api-credentials", requireActiveSubscription, apiCredentialsRouter);
+apiRouter.use("/api-credentials", requireFeature("api"), apiCredentialsRouter);
 apiRouter.use("/open", openApiRouter);
 
 // Billing & Workspace
@@ -53,14 +56,14 @@ apiRouter.use("/live-chat", liveChatRouter);
 apiRouter.use("/contacts", requireActiveSubscription, contactsRouter);
 apiRouter.use("/contact-groups", requireActiveSubscription, contactGroupsRouter);
 apiRouter.use("/bulk-campaigns", requireActiveSubscription, bulkCampaignsRouter);
-apiRouter.use("/group-grabber", requireActiveSubscription, groupGrabberRouter);
+apiRouter.use("/group-grabber", requireFeature("groupGrabber"), groupGrabberRouter);
 
 // Automation & AI
 apiRouter.use("/auto-reply-rules", requireActiveSubscription, autoReplyRulesRouter);
-apiRouter.use("/call-responder-rules", requireActiveSubscription, callResponderRulesRouter);
-apiRouter.use("/chatbot-flows", requireActiveSubscription, chatbotFlowsRouter);
-apiRouter.use("/ai-credentials", requireActiveSubscription, aiCredentialsRouter);
-apiRouter.use("/ai-skills", requireActiveSubscription, aiSkillsRouter);
-apiRouter.use("/ai", requireActiveSubscription, aiCatalogRouter);
+apiRouter.use("/call-responder-rules", requireFeature("callResponder"), callResponderRulesRouter);
+apiRouter.use("/chatbot-flows", requireFeature("chatbot"), chatbotFlowsRouter);
+apiRouter.use("/ai-credentials", requireFeature("ai"), aiCredentialsRouter);
+apiRouter.use("/ai-skills", requireFeature("ai"), aiSkillsRouter);
+apiRouter.use("/ai", requireFeature("ai"), aiCatalogRouter);
 
 export { apiRouter };

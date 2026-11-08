@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { assertCountLimit } from "../billing/entitlements.service";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { isTemplateTypeId, type TemplateTypeId } from "../lib/template-types";
@@ -231,6 +232,7 @@ export async function createTemplate(
   workspaceId: string,
   input: CreateTemplateInput
 ): Promise<TemplateJson> {
+  await assertCountLimit(workspaceId, "templates", await prisma.messageTemplate.count({ where: { workspaceId } }));
   const name = input.name?.trim() || "";
   const content = input.content?.trim() || "";
   if (!name) {

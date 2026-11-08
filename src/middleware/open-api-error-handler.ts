@@ -48,7 +48,8 @@ export function openApiErrorHandler(
       res,
       err.statusCode,
       err.message,
-      err.code ?? "ERROR"
+      err.code ?? "ERROR",
+      err.details
     );
     return;
   }

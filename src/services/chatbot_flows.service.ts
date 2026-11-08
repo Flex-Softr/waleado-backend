@@ -1,4 +1,5 @@
 import { ChatbotFlowNodeKind, Prisma } from "@prisma/client";
+import { assertCountLimit } from "../billing/entitlements.service";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { requireActiveTemplate } from "./templates.service";
@@ -201,6 +202,7 @@ export async function createChatbotFlow(
     nodes: FlowNodeInput[];
   }
 ): Promise<ChatbotFlowListItemJson> {
+  await assertCountLimit(workspaceId, "chatbotFlows", await prisma.chatbotFlow.count({ where: { workspaceId } }));
   const device = await prisma.device.findFirst({
     where: { id: input.deviceId, workspaceId },
   });

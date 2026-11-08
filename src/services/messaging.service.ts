@@ -1,4 +1,5 @@
 import { DeviceStatus, OutboundKind, OutboundStatus } from "@prisma/client";
+import { assertMessageQuota } from "../billing/entitlements.service";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { validateAndFormatPhone } from "../lib/phone";
@@ -270,6 +271,9 @@ export async function sendSingleMessage(
   } else {
     throw new AppError(400, "Invalid message kind", "VALIDATION");
   }
+
+  // Plan message quota (Free: per day, paid plans: per month).
+  await assertMessageQuota(workspaceId, 1);
 
   const row = await prisma.outboundMessage.create({
     data: {

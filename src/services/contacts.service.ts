@@ -1,4 +1,5 @@
 import { ContactStatus, Prisma } from "@prisma/client";
+import { assertCountLimit } from "../billing/entitlements.service";
 import * as XLSX from "xlsx";
 import { env } from "../env";
 import { prisma } from "../lib/prisma";
@@ -262,6 +263,13 @@ function escapeCsvCell(value: string): string {
     : normalized;
 }
 
+/** Contact limit check across all groups of the workspace. */
+async function assertContactCapacity(workspaceId: string, adding: number): Promise<void> {
+  if (adding <= 0) return;
+  const current = await prisma.contact.count({ where: { group: { workspaceId } } });
+  await assertCountLimit(workspaceId, "contacts", current, adding);
+}
+
 export async function createGroup(
   workspaceId: string,
   name: string
@@ -334,6 +342,8 @@ export async function createGroupWithPhones(
       "INVALID_PHONE"
     );
   }
+
+  await assertContactCapacity(workspaceId, uniqueE164.length);
 
   const created = await prisma.$transaction(
     async (tx) => {
@@ -459,6 +469,7 @@ export async function createContact(
   if (!v.valid) {
     throw new AppError(400, v.message, "INVALID_PHONE");
   }
+  await assertContactCapacity(workspaceId, 1);
   try {
     const c = await prisma.contact.create({
       data: {
@@ -575,6 +586,8 @@ export async function bulkCreateContacts(
   if (validated.length === 0) {
     return { created: [], skipped };
   }
+
+  await assertContactCapacity(workspaceId, validated.length);
 
   const dbSkipped: { phone: string; reason: string }[] = [];
 

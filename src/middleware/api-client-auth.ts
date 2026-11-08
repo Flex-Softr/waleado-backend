@@ -5,7 +5,7 @@ import {
   touchApiCredentialLastUsed,
   type AuthenticatedApiClient,
 } from "../services/api_credentials.service";
-import { checkWorkspaceSubscriptionAccess } from "../services/billing.service";
+import { assertFeature } from "../billing/entitlements.service";
 
 export type ApiClientRequest = Request & {
   apiClient?: AuthenticatedApiClient;
@@ -33,14 +33,8 @@ export async function requireApiClient(
     }
 
     const apiClient = await authenticateApiClient(clientId, clientSecret);
-    const access = await checkWorkspaceSubscriptionAccess(apiClient.workspaceId);
-    if (!access.hasAccess) {
-      throw new AppError(
-        402,
-        "Workspace 3-day free trial has expired. A paid subscription is required to use the API.",
-        "SUBSCRIPTION_REQUIRED"
-      );
-    }
+    // API access is a plan feature (Starter and above by default).
+    await assertFeature(apiClient.workspaceId, "api");
 
     req.apiClient = apiClient;
     touchApiCredentialLastUsed(apiClient.credentialId);

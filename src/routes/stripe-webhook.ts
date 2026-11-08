@@ -7,6 +7,7 @@ import { getStripe } from "../lib/stripe-client";
 import {
   handleSubscriptionDeleted,
   syncWorkspaceFromSubscription,
+  fulfillStripePaymentSession,
 } from "../services/billing.service";
 import { createNotification } from "../services/notifications.service";
 
@@ -68,7 +69,11 @@ export async function stripeWebhookHandler(
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        if (session.mode === "subscription" && session.subscription) {
+        if (session.mode === "payment" && session.metadata?.invoiceId) {
+          if (session.payment_status === "paid") {
+            await fulfillStripePaymentSession(session);
+          }
+        } else if (session.mode === "subscription" && session.subscription) {
           const subId =
             typeof session.subscription === "string"
               ? session.subscription

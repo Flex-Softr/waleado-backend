@@ -1,59 +1,36 @@
 import type { NextFunction, Response } from "express";
-import { AppError } from "../lib/errors";
 import { requireAuth, type AuthedRequest } from "./auth";
-import { checkWorkspaceSubscriptionAccess } from "../services/billing.service";
+import { assertFeature, getEntitlements } from "../billing/entitlements.service";
+import type { PlanFeature } from "../billing/limits";
 
 /**
- * Ensures the workspace has an active subscription or active 3-day free trial.
- * If the 3-day trial has expired and no paid plan is active, returns 402 SUBSCRIPTION_REQUIRED.
- * Platform admins bypass this check.
+ * Every workspace now has at least the Free plan, so this only authenticates and
+ * warms the entitlement cache. Kept under the old name so existing routers keep working.
+ * Plan-specific access is enforced with `requireFeature` and per-action limit checks.
  */
-export async function requireActiveSubscription(
+export function requireActiveSubscription(
   req: AuthedRequest,
   res: Response,
   next: NextFunction
-): Promise<void> {
-  if (!req.auth) {
-    requireAuth(req, res, (err) => {
-      if (err) return next(err);
-      proceedSubscriptionCheck(req, res, next);
-    });
-    return;
-  }
-  proceedSubscriptionCheck(req, res, next);
+): void {
+  requireAuth(req, res, (err?: unknown) => {
+    if (err) return next(err);
+    if (!req.auth) return next();
+    getEntitlements(req.auth.wid)
+      .then(() => next())
+      .catch(next);
+  });
 }
 
-async function proceedSubscriptionCheck(
-  req: AuthedRequest,
-  _res: Response,
-  next: NextFunction
-): Promise<void> {
-  const auth = req.auth;
-  if (!auth) {
-    next(new AppError(401, "Unauthorized", "UNAUTHORIZED"));
-    return;
-  }
-
-  // Platform admins always have platform-wide operational access
-  if (auth.userRole === "ADMIN") {
-    next();
-    return;
-  }
-
-  try {
-    const access = await checkWorkspaceSubscriptionAccess(auth.wid, auth.sub);
-    if (!access.hasAccess) {
-      next(
-        new AppError(
-          402,
-          "Your 3-day free trial has expired. Please choose a subscription plan to continue using this feature.",
-          "SUBSCRIPTION_REQUIRED"
-        )
-      );
-      return;
-    }
-    next();
-  } catch (err) {
-    next(err);
-  }
+/** Blocks the route unless the workspace's current plan includes `feature`. */
+export function requireFeature(feature: PlanFeature) {
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    requireAuth(req, res, (err?: unknown) => {
+      if (err) return next(err);
+      if (!req.auth) return next();
+      assertFeature(req.auth.wid, feature)
+        .then(() => next())
+        .catch(next);
+    });
+  };
 }

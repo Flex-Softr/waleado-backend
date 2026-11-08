@@ -1,7 +1,8 @@
 import { env } from "./env";
 import { app } from "./app";
 import { prisma } from "./lib/prisma";
-import { expireAllDueSslCommerzWorkspaces } from "./services/billing.service";
+import { ensureBillingSchema } from "./billing/ensure-billing-schema";
+import { expireLapsedPlans } from "./billing/invoices.service";
 import {
   startBulkCampaignScheduledWorker,
   stopBulkCampaignScheduledWorker,
@@ -24,7 +25,7 @@ process.on("uncaughtException", (error) => {
 });
 
 const port = env.PORT;
-const SSLCOMMERZ_EXPIRY_POLL_MS = 60 * 60 * 1000;
+const PLAN_EXPIRY_POLL_MS = 15 * 60 * 1000;
 
 // ==========================================
 // 2. Database Schema Auto-Healing (Trial Columns)
@@ -57,6 +58,11 @@ let sslInterval: NodeJS.Timeout | null = null;
 
 async function bootstrap() {
   await ensureTrialColumnsExist();
+  try {
+    await ensureBillingSchema();
+  } catch (err) {
+    console.error("[billing] FAILED to apply billing schema — billing features will error until fixed:", err);
+  }
 
   server = app.listen(port, () => {
     console.log(`Waleado API listening on http://localhost:${port}`);
@@ -66,16 +72,16 @@ async function bootstrap() {
     startBulkCampaignScheduledWorker();
     startWaDeviceWatchdog();
     void ensureConnectedWaSessionsOnStartup();
-    void expireAllDueSslCommerzWorkspaces().catch((err) => {
-      console.error("[billing] SSLCommerz expiry sweep failed", err);
+    void expireLapsedPlans().catch((err) => {
+      console.error("[billing] plan expiry sweep failed", err);
     });
   });
 
   sslInterval = setInterval(() => {
-    void expireAllDueSslCommerzWorkspaces().catch((err) => {
-      console.error("[billing] SSLCommerz expiry sweep failed", err);
+    void expireLapsedPlans().catch((err) => {
+      console.error("[billing] plan expiry sweep failed", err);
     });
-  }, SSLCOMMERZ_EXPIRY_POLL_MS);
+  }, PLAN_EXPIRY_POLL_MS);
 }
 
 void bootstrap();
