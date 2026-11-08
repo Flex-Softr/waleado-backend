@@ -17,7 +17,7 @@ import {
   getMessageUsage,
   invalidateEntitlements,
 } from "../billing/entitlements.service";
-import { applyPaidInvoice } from "../billing/invoices.service";
+import { applyPaidInvoice } from "../billing/invoices/invoice.service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const STRIPE_ACTIVE = new Set(["active", "trialing", "past_due"]);

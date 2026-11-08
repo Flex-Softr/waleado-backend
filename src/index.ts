@@ -2,7 +2,7 @@ import { env } from "./env";
 import { app } from "./app";
 import { prisma } from "./lib/prisma";
 import { ensureBillingSchema } from "./billing/ensure-billing-schema";
-import { expireLapsedPlans } from "./billing/invoices.service";
+import { startBackgroundJobs, stopBackgroundJobs } from "./jobs/scheduler";
 import {
   startBulkCampaignScheduledWorker,
   stopBulkCampaignScheduledWorker,
@@ -25,7 +25,6 @@ process.on("uncaughtException", (error) => {
 });
 
 const port = env.PORT;
-const PLAN_EXPIRY_POLL_MS = 15 * 60 * 1000;
 
 // ==========================================
 // 2. Database Schema Auto-Healing (Trial Columns)
@@ -54,7 +53,6 @@ async function ensureTrialColumnsExist(): Promise<void> {
 // 3. Start HTTP Server & Background Workers
 // ==========================================
 let server: ReturnType<typeof app.listen> | null = null;
-let sslInterval: NodeJS.Timeout | null = null;
 
 async function bootstrap() {
   await ensureTrialColumnsExist();
@@ -72,16 +70,8 @@ async function bootstrap() {
     startBulkCampaignScheduledWorker();
     startWaDeviceWatchdog();
     void ensureConnectedWaSessionsOnStartup();
-    void expireLapsedPlans().catch((err) => {
-      console.error("[billing] plan expiry sweep failed", err);
-    });
+    startBackgroundJobs();
   });
-
-  sslInterval = setInterval(() => {
-    void expireLapsedPlans().catch((err) => {
-      console.error("[billing] plan expiry sweep failed", err);
-    });
-  }, PLAN_EXPIRY_POLL_MS);
 }
 
 void bootstrap();
@@ -97,9 +87,7 @@ async function handleShutdown(signal: string): Promise<void> {
   console.log(`[shutdown] Received ${signal}. Starting graceful shutdown...`);
 
   // Clear recurring timers
-  if (sslInterval) {
-    clearInterval(sslInterval);
-  }
+  stopBackgroundJobs();
   stopWaDeviceWatchdog();
 
   // Stop accepting new incoming HTTP connections

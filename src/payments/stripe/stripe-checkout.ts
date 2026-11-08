@@ -48,8 +48,14 @@ export async function createStripeInvoiceCheckout(
           },
         },
       ],
-      success_url: `${appPublicBase()}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${appPublicBase()}/billing?canceled=1`,
+      success_url:
+        input.returnTo === "pay-link"
+          ? `${appPublicBase()}/pay/status?result=success`
+          : `${appPublicBase()}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url:
+        input.returnTo === "pay-link"
+          ? `${appPublicBase()}/pay/status?result=cancelled`
+          : `${appPublicBase()}/billing?canceled=1`,
       client_reference_id: input.workspaceId,
       metadata: {
         workspaceId: input.workspaceId,

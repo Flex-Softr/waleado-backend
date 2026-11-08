@@ -6,7 +6,7 @@ import { hashPassword } from "../lib/password";
 import { validateAndFormatPhone } from "../lib/phone";
 import { planToApi, apiPlanToDb, type PlanIdApi } from "../lib/plan-mapping";
 import { invalidateEntitlements } from "../billing/entitlements.service";
-import { applyPaidInvoice } from "../billing/invoices.service";
+import { applyPaidInvoice } from "../billing/invoices/invoice.service";
 import { fulfillSslCommerzByValId } from "../payments/fulfill-sslcommerz";
 
 const PAGE_SIZE_DEFAULT = 20;

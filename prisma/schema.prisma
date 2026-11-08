@@ -179,8 +179,14 @@ model User {
   trialUsed           Boolean              @default(false)
   trialStartedAt      DateTime?
   trialEndsAt         DateTime?
+  /**
+   * WhatsApp number confirmed by OTP. Unique, so one number backs one account.
+   */
+  verifiedPhone       String?              @unique
+  phoneVerifiedAt     DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
+  phoneOtps           PhoneOtp[]
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
   memberships         Membership[]
@@ -236,11 +242,20 @@ model Workspace {
    * Tier owned for life. When a timed plan above it expires, the workspace falls back here instead of FREE.
    */
   lifetimeTier           Plan?
+  /** Prepaid balance (BDT). Mirrors the sum of WalletTransaction rows. */
+  walletBalance          Decimal                 @default(0) @db.Decimal(12, 2)
+  /** Renew the running plan from the wallet when it ends. */
+  autoRenew              Boolean                 @default(false)
+  /** "Forever" coupon locked in on first use; applied to later renewals. */
+  recurringCouponId      String?
+  recurringCoupon        Coupon?                 @relation(fields: [recurringCouponId], references: [id], onDelete: SetNull)
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   memberships            Membership[]
   paymentTransactions    PaymentTransaction[]
   invoices               Invoice[]
+  walletTransactions     WalletTransaction[]
+  couponRedemptions      CouponRedemption[]
   devices                Device[]
   messageTemplates       MessageTemplate[]
   templateMediaAssets    TemplateMediaAsset[]
@@ -865,6 +880,14 @@ model BillingSettings {
   graceDays       Int      @default(3)
   /** Appended to bulk text messages on plans without removeBranding. Empty disables it. */
   brandingFooter  String?  @default("Sent via Waleado — waleado.app")
+  /** Create the renewal invoice this many days before a plan ends. */
+  renewalInvoiceDays Int     @default(7)
+  /** Send renewal reminders this many days before the end (0 = on the day). */
+  reminderDays       Int[]   @default([7, 3, 1, 0])
+  /** Warn when usage reaches these percentages of a limit. */
+  usageAlertPercents Int[]   @default([80, 100])
+  walletMinTopup     Decimal @default(100) @db.Decimal(12, 2)
+  walletMaxTopup     Decimal @default(100000) @db.Decimal(12, 2)
   updatedAt       DateTime @updatedAt
 }
 
@@ -873,14 +896,22 @@ model Invoice {
   number       String               @unique
   workspaceId  String
   workspace    Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  tier         Plan
-  /** 0 = lifetime */
+  /** Null for wallet top-ups. */
+  tier         Plan?
+  /** 0 = lifetime (ignored for top-ups) */
   months       Int
-  /** new | renewal | upgrade */
+  /** new | renewal | upgrade | topup */
   kind         String
   subtotal     Decimal              @db.Decimal(12, 2)
+  /** Coupon discount. */
+  discount     Decimal              @default(0) @db.Decimal(12, 2)
+  couponId     String?
+  coupon       Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
   /** Proration credit from the plan being replaced. */
   credit       Decimal              @default(0) @db.Decimal(12, 2)
+  /** Paid from the wallet (reserved when the invoice is created). */
+  walletAmount Decimal              @default(0) @db.Decimal(12, 2)
+  /** Left to pay through a gateway. */
   total        Decimal              @db.Decimal(12, 2)
   currency     String
   /** unpaid | paid | cancelled */
@@ -890,10 +921,151 @@ model Invoice {
   periodStart  DateTime?
   periodEnd    DateTime?
   paidAt       DateTime?
+  /** External reference for manual payments (e.g. bKash TrxID). */
+  paymentRef   String?
+  note         String?
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
   payments     PaymentTransaction[]
+  walletTransactions WalletTransaction[]
+  couponRedemption   CouponRedemption?
 
   @@index([workspaceId, createdAt])
   @@index([status])
+}
+
+enum CouponDiscountType {
+  PERCENT
+  FIXED
+}
+
+enum CouponDuration {
+  /** Only the first payment that uses the code. */
+  ONCE
+  /** Locked in for the workspace and applied to every renewal. */
+  FOREVER
+}
+
+model Coupon {
+  id                 String             @id @default(uuid())
+  /** Stored upper-case. */
+  code               String             @unique
+  description        String?
+  discountType       CouponDiscountType
+  /** Percent (1-100) or BDT amount. */
+  discountValue      Decimal            @db.Decimal(12, 2)
+  duration           CouponDuration     @default(ONCE)
+  /** Empty = all paid plans. */
+  tiers              Plan[]
+  /** Billing cycles in months (0 = lifetime). Empty = all. */
+  cycles             Int[]
+  maxRedemptions     Int?
+  perWorkspaceLimit  Int                @default(1)
+  startsAt           DateTime?
+  expiresAt          DateTime?
+  isActive           Boolean            @default(true)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  redemptions        CouponRedemption[]
+  invoices           Invoice[]
+  lockedWorkspaces   Workspace[]
+}
+
+model CouponRedemption {
+  id          String    @id @default(uuid())
+  couponId    String
+  coupon      Coupon    @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoiceId   String    @unique
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount      Decimal   @db.Decimal(12, 2)
+  createdAt   DateTime  @default(now())
+
+  @@index([couponId])
+  @@index([workspaceId])
+}
+
+/** Ledger of wallet changes; amount is positive for credits, negative for debits. */
+model WalletTransaction {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  amount       Decimal   @db.Decimal(12, 2)
+  balanceAfter Decimal   @db.Decimal(12, 2)
+  /** topup | invoice_payment | invoice_refund | adjustment */
+  type         String
+  invoiceId    String?
+  invoice      Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  note         String?
+  /** Admin who made a manual adjustment. */
+  actorUserId  String?
+  createdAt    DateTime  @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+/** Single-row platform settings for system messages and abuse protection (id = "default"). */
+model SystemSettings {
+  id                       String   @id @default("default")
+  /** Admin-workspace device that sends system WhatsApp messages (OTP, reminders). */
+  senderDeviceId           String?
+  emailEnabled             Boolean  @default(true)
+  whatsappEnabled          Boolean  @default(true)
+  /** New accounts must confirm a WhatsApp number before using the dashboard. */
+  requirePhoneVerification Boolean  @default(true)
+  /** Disconnect Free-plan devices idle this many days (0 = never). */
+  idleFreeDeviceDays       Int      @default(30)
+  updatedAt                DateTime @updatedAt
+}
+
+/** Admin overrides of built-in message templates (defaults live in code). */
+model NotificationTemplate {
+  key             String   @id
+  whatsappBody    String?  @db.Text
+  emailSubject    String?
+  emailBody       String?  @db.Text
+  whatsappEnabled Boolean  @default(true)
+  emailEnabled    Boolean  @default(true)
+  updatedAt       DateTime @updatedAt
+}
+
+/** Prevents sending the same scheduled message twice. */
+model NotificationLog {
+  id          String   @id @default(uuid())
+  dedupeKey   String   @unique
+  workspaceId String?
+  templateKey String
+  /** Per-channel outcome, e.g. { "email": "sent", "whatsapp": "skipped" }. */
+  result      Json?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+model PhoneOtp {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  phone      String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([phone, createdAt])
+}
+
+/** Who changed what in billing from the admin panel. */
+model BillingAuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String?
+  actorUserId String?
+  action      String
+  detail      Json?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
 }

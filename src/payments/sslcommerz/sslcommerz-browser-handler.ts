@@ -25,12 +25,19 @@ function pick(
 export async function handleSslCommerzBrowserReturn(
   query: Record<string, string | string[] | undefined>
 ): Promise<{ redirect: string }> {
+  const fromPayLink = pick(query, "return") === "pay-link";
+  // Pay-link customers are not logged in, so they get the public status page instead of /billing.
+  const target = (billingQuery: string, result: string) =>
+    fromPayLink
+      ? `${appPublicBase()}/pay/status?result=${result}`
+      : `${appPublicBase()}/billing${billingQuery}`;
+
   const statusRaw = (pick(query, "status") ?? "").toUpperCase();
   const tranId = pick(query, "tran_id") ?? "";
   const valId = pick(query, "val_id") ?? "";
 
   if (!tranId) {
-    return { redirect: `${appPublicBase()}/billing?payment=invalid` };
+    return { redirect: target("?payment=invalid", "failed") };
   }
 
   const failedStatuses = new Set([
@@ -46,18 +53,19 @@ export async function handleSslCommerzBrowserReturn(
     } else {
       await markTransactionFailed(tranId);
     }
-    return { redirect: `${appPublicBase()}/billing?payment=${statusRaw.toLowerCase()}` };
+    const cancelled = statusRaw === "CANCELLED" || statusRaw === "CANCELED";
+    return { redirect: target(`?payment=${statusRaw.toLowerCase()}`, cancelled ? "cancelled" : "failed") };
   }
 
   if (valId && (statusRaw === "VALID" || statusRaw === "")) {
     try {
       await fulfillSslCommerzByValId({ tranId, valId });
-      return { redirect: `${appPublicBase()}/billing/success?gateway=sslcommerz` };
+      return { redirect: target("/success?gateway=sslcommerz", "success") };
     } catch {
-      return { redirect: `${appPublicBase()}/billing?payment=confirm_failed` };
+      return { redirect: target("?payment=confirm_failed", "failed") };
     }
   }
 
   await markTransactionFailed(tranId);
-  return { redirect: `${appPublicBase()}/billing?payment=unknown` };
+  return { redirect: target("?payment=unknown", "failed") };
 }

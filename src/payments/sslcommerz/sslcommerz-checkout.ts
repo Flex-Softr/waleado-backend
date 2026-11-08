@@ -9,10 +9,6 @@ function apiPublicBase(): string {
   return env.API_PUBLIC_URL.replace(/\/$/, "");
 }
 
-function appPublicBase(): string {
-  return env.APP_PUBLIC_URL.replace(/\/$/, "");
-}
-
 /** SSLCommerz allows max 30 chars for tran_id. */
 function newTranId(): string {
   const part = `${Date.now().toString(36)}${randomBytes(6).toString("hex")}`;
@@ -40,9 +36,8 @@ export async function initiateSslCommerzCheckout(
   const currency = input.currency.toUpperCase();
   const tranId = newTranId();
 
-  const successUrl = `${apiPublicBase()}/v1/payments/sslcommerz/browser-return`;
-  const failUrl = `${apiPublicBase()}/v1/payments/sslcommerz/browser-return`;
-  const cancelUrl = `${apiPublicBase()}/v1/payments/sslcommerz/browser-return`;
+  const returnQuery = input.returnTo === "pay-link" ? "?return=pay-link" : "";
+  const browserReturnUrl = `${apiPublicBase()}/v1/payments/sslcommerz/browser-return${returnQuery}`;
   const ipnUrl = `${apiPublicBase()}/v1/webhooks/payments/sslcommerz/ipn`;
 
   const phone = input.customerPhone.trim() || "01700000000";
@@ -68,9 +63,9 @@ export async function initiateSslCommerzCheckout(
     total_amount: amount,
     currency,
     tran_id: tranId,
-    success_url: successUrl,
-    fail_url: failUrl,
-    cancel_url: cancelUrl,
+    success_url: browserReturnUrl,
+    fail_url: browserReturnUrl,
+    cancel_url: browserReturnUrl,
     ipn_url: ipnUrl,
     product_category: "non-physical-goods",
     product_name: input.description.slice(0, 250),

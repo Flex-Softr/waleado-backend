@@ -1,12 +1,11 @@
-import { Plan, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { prisma } from "../lib/prisma";
-import { AppError } from "../lib/errors";
-import { apiPlanToDb, planToApi, PLAN_ID_VALUES, PAID_PLAN_ID_VALUES } from "../lib/plan-mapping";
-import { getCatalog, invalidateCatalogCache, LIFETIME_MONTHS } from "./catalog.service";
-import { invalidateEntitlements } from "./entitlements.service";
-import { planLimitsSchema } from "./limits";
-import { serializeInvoice } from "./invoices.service";
+import { prisma } from "../../lib/prisma";
+import { AppError } from "../../lib/errors";
+import { apiPlanToDb, planToApi, PLAN_ID_VALUES, PAID_PLAN_ID_VALUES } from "../../lib/plan-mapping";
+import { getCatalog, invalidateCatalogCache, LIFETIME_MONTHS } from "../catalog.service";
+import { invalidateEntitlements } from "../entitlements.service";
+import { planLimitsSchema } from "../limits";
 
 // ---------------------------------------------------------------------------
 // Read
@@ -21,6 +20,11 @@ export async function getAdminBillingConfig() {
       trialPlanId: planToApi(settings.trialTier),
       graceDays: settings.graceDays,
       brandingFooter: settings.brandingFooter ?? "",
+      renewalInvoiceDays: settings.renewalInvoiceDays,
+      reminderDays: settings.reminderDays,
+      usageAlertPercents: settings.usageAlertPercents,
+      walletMinTopup: Number(settings.walletMinTopup),
+      walletMaxTopup: Number(settings.walletMaxTopup),
     },
     plans: plans.map((p) => ({
       id: planToApi(p.tier),
@@ -80,12 +84,24 @@ const planInput = z.object({
   highlights: z.array(z.string().trim().min(1).max(120)).max(20),
 });
 
-const settingsInput = z.object({
-  trialDays: z.coerce.number().int().min(0).max(90),
-  trialPlanId: z.enum(PLAN_ID_VALUES),
-  graceDays: z.coerce.number().int().min(0).max(60),
-  brandingFooter: z.string().trim().max(200),
-});
+const dayList = z.array(z.coerce.number().int().min(0).max(60)).max(10);
+
+const settingsInput = z
+  .object({
+    trialDays: z.coerce.number().int().min(0).max(90),
+    trialPlanId: z.enum(PLAN_ID_VALUES),
+    graceDays: z.coerce.number().int().min(0).max(60),
+    brandingFooter: z.string().trim().max(200),
+    renewalInvoiceDays: z.coerce.number().int().min(0).max(60),
+    reminderDays: dayList,
+    usageAlertPercents: z.array(z.coerce.number().int().min(1).max(100)).max(5),
+    walletMinTopup: money,
+    walletMaxTopup: money,
+  })
+  .refine((s) => s.walletMinTopup <= s.walletMaxTopup, {
+    message: "Minimum top-up must not exceed the maximum",
+    path: ["walletMinTopup"],
+  });
 
 export const adminBillingUpdateSchema = z.object({
   settings: settingsInput.optional(),
@@ -105,6 +121,11 @@ export async function updateAdminBillingConfig(input: AdminBillingUpdate) {
       trialTier: apiPlanToDb(st.trialPlanId),
       graceDays: st.graceDays,
       brandingFooter: st.brandingFooter || null,
+      renewalInvoiceDays: st.renewalInvoiceDays,
+      reminderDays: [...new Set(st.reminderDays)].sort((a, b) => b - a),
+      usageAlertPercents: [...new Set(st.usageAlertPercents)].sort((a, b) => a - b),
+      walletMinTopup: st.walletMinTopup,
+      walletMaxTopup: st.walletMaxTopup,
     };
     ops.push(
       prisma.billingSettings.upsert({
@@ -164,97 +185,4 @@ export async function updateAdminBillingConfig(input: AdminBillingUpdate) {
   invalidateCatalogCache();
   invalidateEntitlements();
   return getAdminBillingConfig();
-}
-
-// ---------------------------------------------------------------------------
-// Invoices (admin view)
-// ---------------------------------------------------------------------------
-
-export async function listAdminInvoices(input: {
-  page: number;
-  pageSize: number;
-  status?: string;
-  q?: string;
-}) {
-  const where: Prisma.InvoiceWhereInput = {};
-  if (input.status) where.status = input.status;
-  const q = input.q?.trim();
-  if (q) {
-    where.OR = [
-      { number: { contains: q, mode: "insensitive" } },
-      { workspace: { name: { contains: q, mode: "insensitive" } } },
-      {
-        workspace: {
-          memberships: { some: { user: { email: { contains: q, mode: "insensitive" } } } },
-        },
-      },
-    ];
-  }
-  const [total, rows] = await Promise.all([
-    prisma.invoice.count({ where }),
-    prisma.invoice.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      skip: (input.page - 1) * input.pageSize,
-      take: input.pageSize,
-      include: {
-        workspace: {
-          select: {
-            id: true,
-            name: true,
-            memberships: {
-              where: { role: "OWNER" },
-              take: 1,
-              select: { user: { select: { email: true, name: true } } },
-            },
-          },
-        },
-      },
-    }),
-  ]);
-  return {
-    page: input.page,
-    pageSize: input.pageSize,
-    total,
-    invoices: rows.map((r) => ({
-      ...serializeInvoice(r),
-      workspace: { id: r.workspace.id, name: r.workspace.name },
-      owner: r.workspace.memberships[0]?.user ?? null,
-    })),
-  };
-}
-
-/** Summary numbers for the admin pricing page. */
-export async function getAdminBillingStats() {
-  const now = new Date();
-  const [byTier, lifetimeByTier, revenue] = await Promise.all([
-    prisma.workspace.groupBy({ by: ["plan"], _count: { _all: true } }),
-    prisma.workspace.groupBy({
-      by: ["lifetimeTier"],
-      where: { lifetimeTier: { not: null } },
-      _count: { _all: true },
-    }),
-    prisma.invoice.aggregate({
-      where: {
-        status: "paid",
-        paidAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1) },
-      },
-      _sum: { total: true },
-      _count: { _all: true },
-    }),
-  ]);
-  const tiers: Plan[] = [Plan.FREE, Plan.STARTER, Plan.PRO, Plan.BUSINESS];
-  return {
-    workspacesByPlan: Object.fromEntries(
-      tiers.map((t) => [planToApi(t), byTier.find((r) => r.plan === t)?._count._all ?? 0])
-    ),
-    lifetimeByPlan: Object.fromEntries(
-      tiers.map((t) => [
-        planToApi(t),
-        lifetimeByTier.find((r) => r.lifetimeTier === t)?._count._all ?? 0,
-      ])
-    ),
-    revenueThisMonth: Number(revenue._sum.total ?? 0),
-    paidInvoicesThisMonth: revenue._count._all,
-  };
 }

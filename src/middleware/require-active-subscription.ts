@@ -2,11 +2,13 @@ import type { NextFunction, Response } from "express";
 import { requireAuth, type AuthedRequest } from "./auth";
 import { assertFeature, getEntitlements } from "../billing/entitlements.service";
 import type { PlanFeature } from "../billing/limits";
+import { assertPhoneVerified } from "../phone-verification/phone-verification.service";
 
 /**
- * Every workspace now has at least the Free plan, so this only authenticates and
- * warms the entitlement cache. Kept under the old name so existing routers keep working.
- * Plan-specific access is enforced with `requireFeature` and per-action limit checks.
+ * Gate for workspace features: authenticated, WhatsApp number verified (when required), and
+ * entitlements loaded. Every workspace has at least the Free plan, so there is no plan lockout;
+ * plan-specific access is enforced with `requireFeature` and per-action limit checks.
+ * Kept under its old name so existing routers keep working.
  */
 export function requireActiveSubscription(
   req: AuthedRequest,
@@ -16,7 +18,9 @@ export function requireActiveSubscription(
   requireAuth(req, res, (err?: unknown) => {
     if (err) return next(err);
     if (!req.auth) return next();
-    getEntitlements(req.auth.wid)
+    const { sub, wid } = req.auth;
+    assertPhoneVerified(sub)
+      .then(() => getEntitlements(wid))
       .then(() => next())
       .catch(next);
   });
@@ -28,7 +32,9 @@ export function requireFeature(feature: PlanFeature) {
     requireAuth(req, res, (err?: unknown) => {
       if (err) return next(err);
       if (!req.auth) return next();
-      assertFeature(req.auth.wid, feature)
+      const { sub, wid } = req.auth;
+      assertPhoneVerified(sub)
+        .then(() => assertFeature(wid, feature))
         .then(() => next())
         .catch(next);
     });

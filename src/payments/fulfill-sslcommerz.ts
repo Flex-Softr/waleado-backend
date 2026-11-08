@@ -1,7 +1,8 @@
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
-import { apiPlanToDb, planToApi, type PlanIdApi } from "../lib/plan-mapping";
-import { applyPaidInvoice, INVOICE_CURRENCY } from "../billing/invoices.service";
+import { apiPlanToDb, type PlanIdApi } from "../lib/plan-mapping";
+import { applyPaidInvoice } from "../billing/invoices/invoice.service";
+import { INVOICE_CURRENCY } from "../billing/checkout/quote.service";
 import { getEntitlements } from "../billing/entitlements.service";
 import * as sslApi from "./sslcommerz/sslcommerz-api";
 
@@ -96,8 +97,8 @@ export async function fulfillSslCommerzByValId(input: {
     data: { status: "paid", valId: input.valId },
   });
 
-  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { tier: true } });
-  return { planId: invoice ? planToApi(invoice.tier) : "free" };
+  const ent = await getEntitlements(row.workspaceId);
+  return { planId: ent.planId };
 }
 
 export async function markTransactionFailed(tranId: string): Promise<void> {

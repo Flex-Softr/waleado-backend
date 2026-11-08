@@ -5,13 +5,8 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { requirePlatformAdmin } from "../middleware/require-platform-admin";
 import * as admin from "../services/admin.service";
 import { PLAN_ID_VALUES } from "../lib/plan-mapping";
-import {
-  adminBillingUpdateSchema,
-  getAdminBillingConfig,
-  getAdminBillingStats,
-  listAdminInvoices,
-  updateAdminBillingConfig,
-} from "../billing/admin-billing.service";
+import { adminBillingRouter } from "./admin/billing.routes";
+import { adminSystemRouter } from "./admin/system.routes";
 
 const router = Router();
 router.use(requireAuth);
@@ -245,47 +240,7 @@ router.post(
   })
 );
 
-// ---------------------------------------------------------------------------
-// Billing configuration: packages, prices, trial/grace settings
-// ---------------------------------------------------------------------------
-
-router.get(
-  "/billing/config",
-  asyncHandler(async (_req, res) => {
-    res.json(await getAdminBillingConfig());
-  })
-);
-
-router.put(
-  "/billing/config",
-  asyncHandler(async (req, res) => {
-    const body = adminBillingUpdateSchema.parse(req.body);
-    res.json(await updateAdminBillingConfig(body));
-  })
-);
-
-router.get(
-  "/billing/stats",
-  asyncHandler(async (_req, res) => {
-    res.json(await getAdminBillingStats());
-  })
-);
-
-router.get(
-  "/billing/invoices",
-  asyncHandler(async (req, res) => {
-    const query = listQuery
-      .extend({ status: z.enum(["unpaid", "paid", "cancelled"]).optional() })
-      .parse(req.query);
-    res.json(
-      await listAdminInvoices({
-        page: query.page ?? 1,
-        pageSize: query.pageSize ?? 20,
-        status: query.status,
-        q: query.q,
-      })
-    );
-  })
-);
+router.use("/billing", adminBillingRouter);
+router.use("/system", adminSystemRouter);
 
 export { router as adminRouter };

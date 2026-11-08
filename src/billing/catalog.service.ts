@@ -1,7 +1,7 @@
-import { Plan, type BillingPlan, type BillingSettings, type PlanPrice } from "@prisma/client";
+import { Plan, Prisma, type BillingPlan, type BillingSettings, type PlanPrice } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { planToApi, tierRank, type PlanIdApi } from "../lib/plan-mapping";
-import { FALLBACK_FREE_LIMITS, parsePlanLimits, type PlanLimits } from "./limits";
+import { parsePlanLimits, type PlanLimits } from "./limits";
 
 /** months value that represents a lifetime (one-time, never expires) price. */
 export const LIFETIME_MONTHS = 0;
@@ -49,6 +49,11 @@ const DEFAULT_SETTINGS: BillingSettings = {
   trialTier: Plan.PRO,
   graceDays: 3,
   brandingFooter: "Sent via Waleado — waleado.app",
+  renewalInvoiceDays: 7,
+  reminderDays: [7, 3, 1, 0],
+  usageAlertPercents: [80, 100],
+  walletMinTopup: new Prisma.Decimal(100),
+  walletMaxTopup: new Prisma.Decimal(100000),
   updatedAt: new Date(0),
 };
 
@@ -167,11 +172,6 @@ export async function getCatalog(): Promise<Catalog> {
 
 export async function getBillingSettings(): Promise<BillingSettings> {
   return (await getCatalog()).settings;
-}
-
-export async function getPlanLimits(tier: Plan): Promise<PlanLimits> {
-  const plan = (await getCatalog()).plans.find((p) => p.tier === tier);
-  return plan?.limits ?? FALLBACK_FREE_LIMITS;
 }
 
 export async function getCatalogPlan(tier: Plan): Promise<CatalogPlan | undefined> {

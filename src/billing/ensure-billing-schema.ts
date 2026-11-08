@@ -7,7 +7,11 @@ import { prisma } from "../lib/prisma";
  * works whether or not `prisma migrate deploy` runs in the pipeline. Order matters:
  * a new enum value must be committed before other statements can use it.
  */
-const MIGRATIONS = ["20261109115900_plan_starter_tier", "20261109120000_billing_v2"];
+const MIGRATIONS = [
+  "20261109115900_plan_starter_tier",
+  "20261109120000_billing_v2",
+  "20261110090000_billing_phase2",
+];
 
 function migrationsDir(): string {
   // dist/billing -> <root>/prisma/migrations ; src/billing (tsx) -> same.

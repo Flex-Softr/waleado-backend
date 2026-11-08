@@ -25,6 +25,7 @@ import {
   clearGoogleOAuthCookies,
 } from "../lib/cookies";
 import { isSafeInternalPath } from "../lib/safe-redirect";
+import { phoneVerificationRouter } from "./phone-verification.routes";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../lib/errors";
 import { env, isGoogleOAuthConfigured } from "../env";
@@ -34,6 +35,8 @@ import {
 } from "../services/google-oauth.service";
 
 const router = Router();
+
+router.use("/phone", phoneVerificationRouter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

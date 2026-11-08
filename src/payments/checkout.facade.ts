@@ -1,7 +1,7 @@
 import { AppError } from "../lib/errors";
 import { env } from "../env";
 import { getStripe } from "../lib/stripe-client";
-import { applyPaidInvoice } from "../billing/invoices.service";
+import { applyPaidInvoice } from "../billing/invoices/invoice.service";
 import type { InitiateCheckoutInput, InitiateCheckoutResult, PaymentGatewayId } from "./types";
 import { createStripeInvoiceCheckout } from "./stripe/stripe-checkout";
 import {

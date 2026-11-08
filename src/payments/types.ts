@@ -16,6 +16,11 @@ export type InitiateCheckoutInput = {
   /** Charged amount in USD for Stripe (null when the price has no USD amount). */
   amountUsd: number | null;
   description: string;
+  /**
+   * Where the customer lands after paying: the billing page (logged in) or the
+   * public pay-link status page.
+   */
+  returnTo?: "billing" | "pay-link";
 };
 
 export type InitiateCheckoutResult =
