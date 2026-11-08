@@ -1,11 +1,12 @@
 import { env } from "../env";
+import { isStripeKeyConfigured } from "../lib/stripe-client";
 import { sslCommerzConfigured } from "./sslcommerz/sslcommerz-checkout";
 import { isStripeLineItemEnvReference } from "./stripe/stripe-price-ref";
 import type { PaymentGatewayMeta } from "./types";
 
 function stripeConfigured(): boolean {
   return Boolean(
-    env.STRIPE_SECRET_KEY?.trim() &&
+    isStripeKeyConfigured() &&
       isStripeLineItemEnvReference(env.STRIPE_PRICE_PRO_MONTHLY) &&
       isStripeLineItemEnvReference(env.STRIPE_PRICE_BUSINESS_MONTHLY)
   );
@@ -15,7 +16,11 @@ function stripeGatewayDescription(): string {
   if (stripeConfigured()) {
     return "Subscription checkout with Stripe (cards).";
   }
-  const secret = Boolean(env.STRIPE_SECRET_KEY?.trim());
+  const rawKey = env.STRIPE_SECRET_KEY?.trim();
+  if (rawKey && !isStripeKeyConfigured()) {
+    return "Stripe is disabled: a test-mode key (sk_test_) cannot be used in production.";
+  }
+  const secret = Boolean(rawKey);
   const proRaw = env.STRIPE_PRICE_PRO_MONTHLY?.trim();
   const bizRaw = env.STRIPE_PRICE_BUSINESS_MONTHLY?.trim();
   if (secret) {

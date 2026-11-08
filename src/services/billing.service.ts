@@ -3,7 +3,7 @@ import { Plan } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { env } from "../env";
-import { getStripe } from "../lib/stripe-client";
+import { getStripe, isStripeKeyConfigured } from "../lib/stripe-client";
 import { listPaymentGateways } from "../payments/gateway-catalog";
 import {
   apiPaidPlanToDb,
@@ -347,7 +347,7 @@ export async function getBillingForWorkspace(
       isTrialExpired: false,
       hasActiveSubscription: true,
       daysRemaining: null,
-      stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
+      stripeConfigured: isStripeKeyConfigured(),
       stripePortalEligible: false,
       paymentGateways: listPaymentGateways(),
     };
@@ -427,7 +427,7 @@ export async function getBillingForWorkspace(
     isTrialExpired,
     hasActiveSubscription,
     daysRemaining,
-    stripeConfigured: Boolean(env.STRIPE_SECRET_KEY),
+    stripeConfigured: isStripeKeyConfigured(),
     stripePortalEligible,
     paymentGateways: listPaymentGateways(),
   };
