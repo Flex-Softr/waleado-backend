@@ -333,7 +333,11 @@ router.post(
       throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
     }
     const body = changePasswordSchema.parse(req.body);
-    const result = await changePasswordForUser(auth.sub, body);
+    const result = await changePasswordForUser(
+      auth.sub,
+      body,
+      readRefreshCookie(req)
+    );
     res.json(result);
   })
 );

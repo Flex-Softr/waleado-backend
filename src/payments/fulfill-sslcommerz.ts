@@ -39,7 +39,7 @@ export async function fulfillSslCommerzByValId(input: {
   if (!PAID_STATUSES.has(st)) {
     throw new AppError(400, "Payment not validated by SSLCommerz", "PAYMENT_INVALID");
   }
-  if (validated.tran_id && validated.tran_id !== input.tranId) {
+  if (!validated.tran_id || validated.tran_id !== input.tranId) {
     throw new AppError(400, "Transaction mismatch", "TRANSACTION_MISMATCH");
   }
 

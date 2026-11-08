@@ -254,9 +254,12 @@ export async function requestPasswordReset(input: {
     expiresMinutes: env.PASSWORD_RESET_TOKEN_MINUTES,
   });
 
+  // Never expose the reset link in the API response outside local development:
+  // anyone who knows an email address could otherwise take over the account.
+  const exposeResetUrl = !mail.delivered && env.NODE_ENV !== "production";
   return {
     ok: true,
-    ...(!mail.delivered ? { resetUrl } : {}),
+    ...(exposeResetUrl ? { resetUrl } : {}),
     emailDelivered: mail.delivered,
   };
 }
@@ -413,12 +416,14 @@ export async function refreshSession(rawCookie: string | undefined): Promise<{
 
   const user = record.user;
 
-  await prisma.$transaction([
-    prisma.refreshToken.update({
-      where: { id: record.id },
-      data: { revokedAt: new Date() },
-    }),
-  ]);
+  // Atomic rotation: only one request can consume a given refresh token.
+  const consumed = await prisma.refreshToken.updateMany({
+    where: { id: record.id, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  if (consumed.count !== 1) {
+    throw new AppError(401, "Invalid or expired session", "REFRESH_INVALID");
+  }
 
   const issued = await issueSession(user);
   return issued;
@@ -519,7 +524,8 @@ export async function changePasswordForUser(
   input: {
     currentPassword?: string;
     newPassword: string;
-  }
+  },
+  currentRefreshCookie?: string
 ) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -551,10 +557,24 @@ export async function changePasswordForUser(
   }
 
   const passwordHash = await hashPassword(input.newPassword);
-  await prisma.user.update({
-    where: { id: userId },
-    data: { passwordHash },
-  });
+  const keepHash = currentRefreshCookie
+    ? hashRefreshToken(currentRefreshCookie)
+    : undefined;
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    }),
+    // Sign out every other device; keep only the session making this change.
+    prisma.refreshToken.updateMany({
+      where: {
+        userId,
+        revokedAt: null,
+        ...(keepHash ? { hashedToken: { not: keepHash } } : {}),
+      },
+      data: { revokedAt: new Date() },
+    }),
+  ]);
 
   return { ok: true, message: "Password updated successfully" };
 }
