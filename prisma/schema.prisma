@@ -958,9 +958,9 @@ model Coupon {
   discountValue      Decimal            @db.Decimal(12, 2)
   duration           CouponDuration     @default(ONCE)
   /** Empty = all paid plans. */
-  tiers              Plan[]
+  tiers              Plan[]             @default([])
   /** Billing cycles in months (0 = lifetime). Empty = all. */
-  cycles             Int[]
+  cycles             Int[]              @default([])
   maxRedemptions     Int?
   perWorkspaceLimit  Int                @default(1)
   startsAt           DateTime?
