@@ -9,6 +9,8 @@
     "dev": "node scripts/free-port.cjs 4000 && tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run",
     "db:generate": "node scripts/run-prisma.cjs generate",
     "db:migrate": "node scripts/run-prisma.cjs migrate dev",
     "db:push": "node scripts/run-prisma.cjs db push",
@@ -58,6 +60,7 @@
     "@types/nodemailer": "^8.0.1",
     "patch-package": "^8.0.1",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.7"
   }
 }
