@@ -5,7 +5,7 @@ import { AppError } from "../lib/errors";
 import { asyncHandler } from "../lib/async-handler";
 import { verifyPayToken } from "../billing/invoices/pay-link";
 import { getInvoiceDetailById } from "../billing/invoices/invoice.service";
-import { payInvoice } from "../billing/checkout/checkout.service";
+import { invoiceAmountUsd, payInvoice } from "../billing/checkout/checkout.service";
 import { listPaymentGateways } from "../payments/gateway-catalog";
 
 /**
@@ -21,8 +21,12 @@ function invoiceIdFrom(token: string): string {
 }
 
 router.get("/:token", asyncHandler(async (req, res) => {
-  const invoice = await getInvoiceDetailById(invoiceIdFrom(req.params.token));
-  if (!invoice) throw new AppError(404, "This payment link is not valid.", "NOT_FOUND");
+  const invoiceId = invoiceIdFrom(req.params.token);
+  const [invoice, row] = await Promise.all([
+    getInvoiceDetailById(invoiceId),
+    prisma.invoice.findUnique({ where: { id: invoiceId } }),
+  ]);
+  if (!invoice || !row) throw new AppError(404, "This payment link is not valid.", "NOT_FOUND");
   res.json({
     invoice: {
       number: invoice.number,
@@ -33,7 +37,9 @@ router.get("/:token", asyncHandler(async (req, res) => {
       credit: invoice.credit,
       walletAmount: invoice.walletAmount,
       total: invoice.total,
+      amountUsd: invoice.status === "unpaid" ? await invoiceAmountUsd(row) : null,
       currency: invoice.currency,
+      couponCode: invoice.couponCode,
       createdAt: invoice.createdAt,
       paidAt: invoice.paidAt,
       workspace: invoice.billedTo.workspace,

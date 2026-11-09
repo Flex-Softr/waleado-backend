@@ -78,10 +78,11 @@ const netValue = (inv: { subtotal: unknown; discount: unknown }) =>
 /**
  * Unused value of the timed periods still running for a tier.
  * Renewals stack, so every paid invoice that has not fully elapsed contributes its unused share.
+ * Periods already converted into credit by an earlier upgrade are skipped.
  */
 async function remainingTimedCredit(workspaceId: string, tier: Plan, now: Date): Promise<number> {
   const invoices = await prisma.invoice.findMany({
-    where: { workspaceId, status: "paid", tier, months: { gt: 0 }, periodEnd: { gt: now } },
+    where: { workspaceId, status: "paid", tier, months: { gt: 0 }, periodEnd: { gt: now }, supersededAt: null },
     select: { subtotal: true, discount: true, periodStart: true, periodEnd: true },
   });
   let credit = 0;

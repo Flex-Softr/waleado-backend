@@ -921,6 +921,8 @@ model Invoice {
   periodStart  DateTime?
   periodEnd    DateTime?
   paidAt       DateTime?
+  /** Set when this period's unused value was turned into upgrade credit, so it is never credited twice. */
+  supersededAt DateTime?
   /** External reference for manual payments (e.g. bKash TrxID). */
   paymentRef   String?
   note         String?

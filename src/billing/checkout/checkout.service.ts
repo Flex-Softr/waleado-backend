@@ -38,8 +38,6 @@ export async function payInvoice(
     return { activated: true, invoice: serializeInvoice(paid) };
   }
 
-  const subtotal = Number(invoice.subtotal);
-  const usdPrice = invoice.tier ? await usdPriceFor(invoice.tier, invoice.months) : null;
   const result = await initiatePaidCheckout(gateway, {
     workspaceId: invoice.workspaceId,
     userEmail: payer.email,
@@ -49,7 +47,7 @@ export async function payInvoice(
     planId: invoice.tier ? planToApi(invoice.tier) : "free",
     amount: total,
     currency: invoice.currency,
-    amountUsd: usdPrice !== null && subtotal > 0 ? Math.round(((usdPrice * total) / subtotal) * 100) / 100 : null,
+    amountUsd: await invoiceAmountUsd(invoice),
     description: invoice.description,
     returnTo,
   });
@@ -77,9 +75,17 @@ async function createAndPay(
   }
 }
 
-async function usdPriceFor(tier: NonNullable<Invoice["tier"]>, months: number): Promise<number | null> {
-  const price = await prisma.planPrice.findUnique({ where: { tier_months: { tier, months } }, select: { amountUsd: true } });
-  return price?.amountUsd ? Number(price.amountUsd) : null;
+/** What the invoice's amount due costs by card in USD (Stripe), pro-rated from the plan's USD price.
+ * Null when the plan has no USD price (e.g. top-ups), meaning Stripe can't be used. */
+export async function invoiceAmountUsd(invoice: Invoice): Promise<number | null> {
+  const subtotal = Number(invoice.subtotal);
+  if (!invoice.tier || subtotal <= 0) return null;
+  const price = await prisma.planPrice.findUnique({
+    where: { tier_months: { tier: invoice.tier, months: invoice.months } },
+    select: { amountUsd: true },
+  });
+  if (!price?.amountUsd) return null;
+  return Math.round(((Number(price.amountUsd) * Number(invoice.total)) / subtotal) * 100) / 100;
 }
 
 export async function startPlanCheckout(

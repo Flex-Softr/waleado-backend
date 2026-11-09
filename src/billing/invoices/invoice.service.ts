@@ -97,6 +97,14 @@ export async function createInvoice(
   });
 }
 
+/** The old plan's running periods end here: their unused value was (or would be) credited to the new plan. */
+async function supersedeRunningPeriods(tx: Tx, workspaceId: string, tier: Plan, now: Date): Promise<void> {
+  await tx.invoice.updateMany({
+    where: { workspaceId, status: "paid", tier, months: { gt: 0 }, periodEnd: { gt: now }, supersededAt: null },
+    data: { supersededAt: now },
+  });
+}
+
 /** Moves the workspace onto the plan an invoice paid for and returns the period it covers. */
 async function applyPlanInvoice(
   tx: Tx,
@@ -113,6 +121,8 @@ async function applyPlanInvoice(
     subscriptionStatus: "active",
     lastPaymentGateway: gateway ?? invoice.gateway ?? null,
   };
+  // Moving to another tier (or to lifetime) ends the timed periods of the current tier.
+  const replacesTimedPlan = ws.plan !== tier || invoice.months === LIFETIME_MONTHS;
 
   if (invoice.months === LIFETIME_MONTHS) {
     data.lifetimeTier = tier;
@@ -125,6 +135,7 @@ async function applyPlanInvoice(
       data.plan = tier;
       data.currentPeriodEnd = null;
       data.billingMonths = LIFETIME_MONTHS;
+      if (replacesTimedPlan) await supersedeRunningPeriods(tx, invoice.workspaceId, ws.plan, now);
     }
     await tx.workspace.update({ where: { id: invoice.workspaceId }, data });
     return { periodStart: now, periodEnd: null };
@@ -137,6 +148,7 @@ async function applyPlanInvoice(
   const net = Number(invoice.subtotal) - Number(invoice.discount);
   const periodEnd = new Date(baseEnd.getTime() + bonusPeriodMs(net, Number(invoice.credit), periodStart, baseEnd));
 
+  if (replacesTimedPlan) await supersedeRunningPeriods(tx, invoice.workspaceId, ws.plan, now);
   data.plan = tier;
   data.currentPeriodEnd = periodEnd;
   data.billingMonths = invoice.months;

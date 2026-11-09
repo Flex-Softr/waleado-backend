@@ -27,8 +27,9 @@ function resolve(key: TemplateKey, row: OverrideRow | undefined): ResolvedTempla
       def.email === null
         ? null
         : { subject: row?.emailSubject ?? def.email.subject, body: row?.emailBody ?? def.email.body },
-    whatsappEnabled: row?.whatsappEnabled ?? true,
-    emailEnabled: row?.emailEnabled ?? true,
+    // A template's only channel can't be switched off (e.g. OTP codes must always go out).
+    whatsappEnabled: def.email === null || (row?.whatsappEnabled ?? true),
+    emailEnabled: def.whatsapp === null || (row?.emailEnabled ?? true),
     customized: Boolean(row),
   };
 }

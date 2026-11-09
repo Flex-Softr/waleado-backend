@@ -11,6 +11,7 @@ const MIGRATIONS = [
   "20261109115900_plan_starter_tier",
   "20261109120000_billing_v2",
   "20261110090000_billing_phase2",
+  "20261110120000_invoice_superseded",
 ];
 
 function migrationsDir(): string {
