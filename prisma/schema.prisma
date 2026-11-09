@@ -842,7 +842,7 @@ model BillingPlan {
   limits     Json
   /** Marketing bullet points (string[]). */
   highlights Json        @default("[]")
-  updatedAt  DateTime    @updatedAt
+  updatedAt  DateTime    @default(now()) @updatedAt
   prices     PlanPrice[]
 }
 
@@ -865,7 +865,7 @@ model PlanPrice {
   /** Stop selling after this moment. */
   saleEndsAt   DateTime?
   createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  updatedAt    DateTime    @default(now()) @updatedAt
 
   @@unique([tier, months])
 }
@@ -888,7 +888,7 @@ model BillingSettings {
   usageAlertPercents Int[]   @default([80, 100])
   walletMinTopup     Decimal @default(100) @db.Decimal(12, 2)
   walletMaxTopup     Decimal @default(100000) @db.Decimal(12, 2)
-  updatedAt       DateTime @updatedAt
+  updatedAt       DateTime @default(now()) @updatedAt
 }
 
 model Invoice {
@@ -927,7 +927,7 @@ model Invoice {
   paymentRef   String?
   note         String?
   createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @updatedAt
+  updatedAt    DateTime             @default(now()) @updatedAt
   payments     PaymentTransaction[]
   walletTransactions WalletTransaction[]
   couponRedemption   CouponRedemption?
@@ -967,7 +967,7 @@ model Coupon {
   expiresAt          DateTime?
   isActive           Boolean            @default(true)
   createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  updatedAt          DateTime           @default(now()) @updatedAt
   redemptions        CouponRedemption[]
   invoices           Invoice[]
   lockedWorkspaces   Workspace[]
@@ -1018,7 +1018,7 @@ model SystemSettings {
   requirePhoneVerification Boolean  @default(true)
   /** Disconnect Free-plan devices idle this many days (0 = never). */
   idleFreeDeviceDays       Int      @default(30)
-  updatedAt                DateTime @updatedAt
+  updatedAt                DateTime @default(now()) @updatedAt
 }
 
 /** Admin overrides of built-in message templates (defaults live in code). */
@@ -1029,7 +1029,7 @@ model NotificationTemplate {
   emailBody       String?  @db.Text
   whatsappEnabled Boolean  @default(true)
   emailEnabled    Boolean  @default(true)
-  updatedAt       DateTime @updatedAt
+  updatedAt       DateTime @default(now()) @updatedAt
 }
 
 /** Prevents sending the same scheduled message twice. */
