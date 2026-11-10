@@ -30,16 +30,16 @@ describe("wallet", () => {
   });
 
   it("reserves the wallet share when the invoice is created and returns it on cancel", async () => {
-    const ws = await createWorkspace({ walletBalance: 1000 });
+    const ws = await createWorkspace({ walletBalance: 100 });
     const quote = await quotePurchase(ws.id, Plan.PRO, 1, { useWallet: true });
-    expect(quote.walletAmount).toBe(1000);
-    expect(quote.total).toBe(PRICE.PRO_1 - 1000);
+    expect(quote.walletAmount).toBe(100);
+    expect(quote.total).toBe(PRICE.PRO_1 - 100);
 
     const invoice = await createInvoice(ws.id, quote);
     expect(await walletBalance(ws.id)).toBe(0);
 
     await cancelInvoice(invoice.id);
-    expect(await walletBalance(ws.id)).toBe(1000);
+    expect(await walletBalance(ws.id)).toBe(100);
   });
 
   it("refunds the older invoice's reservation when a new invoice replaces it", async () => {
@@ -52,14 +52,14 @@ describe("wallet", () => {
   });
 
   it("takes the wallet share again when a cancelled invoice is paid late", async () => {
-    const ws = await createWorkspace({ walletBalance: 500 });
+    const ws = await createWorkspace({ walletBalance: 100 });
     const invoice = await createInvoice(ws.id, await quotePurchase(ws.id, Plan.PRO, 1, { useWallet: true }));
     await cancelInvoice(invoice.id);
     await applyPaidInvoice(invoice.id, "test", { notify: false });
 
     expect(await walletBalance(ws.id)).toBe(0);
-    // Reserve −500, refund on cancel +500, late payment −500.
-    expect(await ledgerSum(ws.id)).toBe(-500);
+    // Reserve −100, refund on cancel +100, late payment −100.
+    expect(await ledgerSum(ws.id)).toBe(-100);
   });
 
   it("activates a plan fully covered by the wallet", async () => {

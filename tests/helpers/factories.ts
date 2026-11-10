@@ -6,13 +6,13 @@ import { applyPaidInvoice, createInvoice } from "../../src/billing/invoices/invo
 
 export const DAY = 24 * 60 * 60 * 1000;
 
-/** List prices seeded by the billing migration (BDT). */
+/** Default list prices after the launch-price migration (BDT). */
 export const PRICE = {
-  STARTER_1: 990,
-  PRO_1: 2490,
-  PRO_12: 22400,
-  PRO_LIFETIME: 49900,
-  BUSINESS_1: 5990,
+  STARTER_1: 149,
+  PRO_1: 249,
+  PRO_12: 1990,
+  PRO_LIFETIME: 3990,
+  BUSINESS_1: 349,
 } as const;
 
 /** A customer workspace with one owner. Starts on Free with no trial unless overridden. */
