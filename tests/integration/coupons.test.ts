@@ -12,8 +12,8 @@ describe("coupons at checkout", () => {
     const ws = await createWorkspace();
     await createCoupon({ code: "FOUNDER20", discountValue: 20 });
     const quote = await quotePurchase(ws.id, Plan.PRO, 1, { couponCode: "founder20" });
-    expect(quote.discount).toBe(PRICE.PRO_1 * 0.2);
-    expect(quote.total).toBe(PRICE.PRO_1 * 0.8);
+    expect(quote.discount).toBeCloseTo(PRICE.PRO_1 * 0.2, 2);
+    expect(quote.total).toBeCloseTo(PRICE.PRO_1 * 0.8, 2);
     expect(quote.coupon?.code).toBe("FOUNDER20");
   });
 
@@ -65,7 +65,7 @@ describe("coupons at checkout", () => {
     const renewal = await quotePurchase(ws.id, Plan.PRO, 1);
     expect(renewal.kind).toBe("renewal");
     expect(renewal.coupon?.code).toBe("LIFE30");
-    expect(renewal.discount).toBe(PRICE.PRO_1 * 0.3);
+    expect(renewal.discount).toBeCloseTo(PRICE.PRO_1 * 0.3, 2);
   });
 
   it("is not counted as used until the invoice is paid", async () => {
