@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS "ConversationFollowUp" (
   "analyzedAt" TIMESTAMP(3),
   "analyzedActivityAt" TIMESTAMP(3),
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
   CONSTRAINT "ConversationFollowUp_pkey" PRIMARY KEY ("id")
 );
 

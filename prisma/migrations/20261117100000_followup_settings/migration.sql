@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS "FollowUpSettings" (
   "idleHours" INTEGER NOT NULL DEFAULT 2,
   "maxDays" INTEGER NOT NULL DEFAULT 30,
   "instructions" TEXT,
-  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
   CONSTRAINT "FollowUpSettings_pkey" PRIMARY KEY ("workspaceId")
 );
 
