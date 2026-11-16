@@ -35,6 +35,104 @@ import {
   buildTemplateWhatsAppContent,
 } from "./wa-outbound-content";
 import { decodeLiveChatBodyText } from "./live_chat_message_codec";
+import {
+  chooseRule,
+  conversationExpiry,
+  isPrivateChatJid,
+} from "../lib/ai-conversation-routing";
+
+function isAiRule(r: { aiSkill?: unknown; openAiEnabled: boolean }): boolean {
+  return Boolean(r.aiSkill) || r.openAiEnabled;
+}
+
+function conversationPeerKey(peerPhone: string | null, remoteJid: string): string {
+  return peerPhone ?? remoteJid.toLowerCase();
+}
+
+/** Rule id of this contact's unexpired AI conversation, or null. Survives restarts (DB). */
+async function findActiveConversationRuleId(
+  workspaceId: string,
+  deviceId: string,
+  peerKey: string
+): Promise<string | null> {
+  try {
+    const row = await prisma.aiConversation.findUnique({
+      where: {
+        workspaceId_deviceId_peerKey: { workspaceId, deviceId, peerKey },
+      },
+      select: { ruleId: true, status: true, expiresAt: true },
+    });
+    if (!row || row.status !== "ACTIVE" || row.expiresAt.getTime() <= Date.now()) {
+      return null;
+    }
+    return row.ruleId;
+  } catch (err) {
+    console.warn("[auto-reply] failed to load AI conversation", err);
+    return null;
+  }
+}
+
+/** Opens or extends the contact's AI conversation after the AI replied. */
+async function touchAiConversation(params: {
+  workspaceId: string;
+  deviceId: string;
+  peerKey: string;
+  ruleId: string;
+  hours: number;
+}): Promise<void> {
+  if (params.hours <= 0) return;
+  const now = new Date();
+  const expiresAt = conversationExpiry(now.getTime(), params.hours);
+  try {
+    await prisma.aiConversation.upsert({
+      where: {
+        workspaceId_deviceId_peerKey: {
+          workspaceId: params.workspaceId,
+          deviceId: params.deviceId,
+          peerKey: params.peerKey,
+        },
+      },
+      create: {
+        workspaceId: params.workspaceId,
+        deviceId: params.deviceId,
+        peerKey: params.peerKey,
+        ruleId: params.ruleId,
+        status: "ACTIVE",
+        startedAt: now,
+        lastActivityAt: now,
+        expiresAt,
+      },
+      update: {
+        ruleId: params.ruleId,
+        status: "ACTIVE",
+        lastActivityAt: now,
+        expiresAt,
+      },
+    });
+  } catch (err) {
+    console.warn("[auto-reply] failed to save AI conversation", err);
+  }
+}
+
+/** Ends the AI conversation (stop word, human took over). Safe to fire and forget. */
+export async function closeAiConversation(
+  workspaceId: string,
+  deviceId: string,
+  peerKeys: Array<string | null | undefined>
+): Promise<void> {
+  const keys = peerKeys
+    .filter((k): k is string => Boolean(k))
+    .map((k) => (k.startsWith("+") ? k : k.toLowerCase()));
+  if (keys.length === 0) return;
+  try {
+    await prisma.aiConversation.updateMany({
+      where: { workspaceId, deviceId, peerKey: { in: keys }, status: "ACTIVE" },
+      data: { status: "CLOSED" },
+    });
+  } catch (err) {
+    console.warn("[auto-reply] failed to close AI conversation", err);
+  }
+}
 
 /**
  * Cooldown is per matched trigger phrase (not only per rule), so one rule with
@@ -191,6 +289,7 @@ export function recordHumanReply(
   remoteJid?: string | null
 ): void {
   const now = Date.now();
+  void closeAiConversation(workspaceId, deviceId, [peerPhone, remoteJid]);
   if (peerPhone) {
     humanReplyTimestampsByKey.set(
       humanReplyKey(workspaceId, deviceId, peerPhone),
@@ -660,8 +759,13 @@ async function buildAutoReplyPayload(
   deviceId: string,
   peerPhone: string | null,
   rule: AutoReplyRuleRow,
-  inboundText: string
-): Promise<{ payload: AnyMessageContent; textContent?: string } | null> {
+  inboundText: string,
+  forceContinuous = false
+): Promise<{
+  payload: AnyMessageContent;
+  textContent?: string;
+  aiGenerated?: boolean;
+} | null> {
   if (rule.aiSkill || rule.openAiEnabled) {
     let resolved: OpenAiSettingsInput | null = null;
     let continuousChat = false;
@@ -754,7 +858,7 @@ async function buildAutoReplyPayload(
     if (resolved?.apiKey) {
       try {
         let history: ChatHistoryMessage[] | undefined;
-        if (continuousChat && peerPhone) {
+        if ((continuousChat || forceContinuous) && peerPhone) {
           history = await loadChatHistory(
             workspaceId,
             deviceId,
@@ -767,7 +871,11 @@ async function buildAutoReplyPayload(
           inboundText,
           history
         );
-        return { payload: { text: aiText }, textContent: aiText };
+        return {
+          payload: { text: aiText },
+          textContent: aiText,
+          aiGenerated: true,
+        };
       } catch (e) {
         console.error(
           "[auto-reply] AI reply failed, using fallback",
@@ -949,6 +1057,7 @@ export async function dispatchAutoRepliesForInbound(
         remoteJid
       );
       if (humanReplied) {
+        await closeAiConversation(workspaceId, deviceId, [peerPhone, remoteJid]);
         clearActiveAiSession(workspaceId, deviceId, remoteJid);
         if (peerPhone) {
           clearActiveAiSessionsForPhone(workspaceId, deviceId, peerPhone);
@@ -958,6 +1067,7 @@ export async function dispatchAutoRepliesForInbound(
 
       // 2. Check if contact sent an explicit stop keyword
       if (isExplicitStopKeyword(text)) {
+        await closeAiConversation(workspaceId, deviceId, [peerPhone, remoteJid]);
         clearActiveAiSession(workspaceId, deviceId, remoteJid);
         if (peerPhone) {
           clearActiveAiSessionsForPhone(workspaceId, deviceId, peerPhone);
@@ -965,17 +1075,41 @@ export async function dispatchAutoRepliesForInbound(
         return;
       }
 
-      // 3. Only trigger if the incoming message explicitly matches an active auto-reply rule's keywords.
-      // If someone starts chat or writes without saying a set keyword: DO NOT SEND ANY MESSAGE.
+      // 3. Pick the rule: an explicit keyword wins; otherwise (private chats only) an active
+      // AI conversation continues without a keyword; otherwise the device's "new chats"
+      // fallback AI rule answers. If none applies, stay silent.
       const keywordMatch = selectRuleToExecute(rules, text);
-      if (!keywordMatch) {
+      const privateChat = isPrivateChatJid(remoteJid);
+      const peerKey = conversationPeerKey(peerPhone, remoteJid);
+      const activeRuleId =
+        !keywordMatch && privateChat
+          ? await findActiveConversationRuleId(workspaceId, deviceId, peerKey)
+          : null;
+
+      const decision = chooseRule({
+        keywordRule: keywordMatch
+          ? {
+              ...keywordMatch.rule,
+              isAi: isAiRule(keywordMatch.rule),
+            }
+          : null,
+        activeRuleId,
+        rules: rules.map((r) => ({ ...r, isAi: isAiRule(r) })),
+        privateChat,
+      });
+      if (!decision) {
         return;
       }
 
-      const { rule, matchedKeyword } = keywordMatch;
+      const rule = decision.rule as unknown as AutoReplyRuleRow;
+      const matchedKeyword =
+        decision.source === "keyword" && keywordMatch
+          ? keywordMatch.matchedKeyword
+          : `__${decision.source}__`;
 
+      // Cooldown only throttles explicit keyword triggers, never an ongoing conversation.
       const cooldownKey = `${deviceId}:${rule.id}:${remoteJid}:${participant}:${matchedKeyword}`;
-      if (rule.cooldownMinutes > 0) {
+      if (decision.source === "keyword" && rule.cooldownMinutes > 0) {
         const until = cooldownUntilByKey.get(cooldownKey) ?? 0;
         if (now < until) return;
       }
@@ -985,7 +1119,8 @@ export async function dispatchAutoRepliesForInbound(
         deviceId,
         peerPhone,
         rule,
-        text
+        text,
+        decision.source !== "keyword"
       );
       if (!result) return;
 
@@ -1014,7 +1149,16 @@ export async function dispatchAutoRepliesForInbound(
             result.textContent
           );
         }
-        if (rule.cooldownMinutes > 0) {
+        if (result.aiGenerated) {
+          await touchAiConversation({
+            workspaceId,
+            deviceId,
+            peerKey,
+            ruleId: rule.id,
+            hours: rule.conversationHours,
+          });
+        }
+        if (decision.source === "keyword" && rule.cooldownMinutes > 0) {
           cooldownUntilByKey.set(
             cooldownKey,
             now + rule.cooldownMinutes * 60_000

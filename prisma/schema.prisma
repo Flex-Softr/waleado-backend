@@ -271,6 +271,7 @@ model Workspace {
   aiSkills               AiSkill[]
   apiCredentials         ApiCredential[]
   notifications          Notification[]
+  aiConversations        AiConversation[]
 }
 
 /**
@@ -341,6 +342,7 @@ model Device {
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
 
+  aiConversations        AiConversation[]
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
 }
@@ -523,8 +525,18 @@ model AutoReplyRule {
   openAiSettings  Json?
   aiSkillId       String?
   aiSkill         AiSkill?             @relation(fields: [aiSkillId], references: [id], onDelete: SetNull)
+  /**
+   * AI rules only: after this rule's AI replies, keep answering that contact without keywords
+   * for this many hours (rolling, from the last AI reply). 0 disables continuous conversation.
+   */
+  conversationHours   Int              @default(24)
+  /**
+   * AI rules only: answer private chats that match no keyword (new chats). Off by default.
+   */
+  fallbackForNewChats Boolean          @default(false)
   active          Boolean              @default(true)
   responseCount   Int                  @default(0)
+  aiConversations AiConversation[]
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -1070,4 +1082,34 @@ model BillingAuditLog {
   createdAt   DateTime @default(now())
 
   @@index([workspaceId, createdAt])
+}
+
+enum AiConversationStatus {
+  ACTIVE
+  CLOSED
+}
+
+/**
+ * Persistent AI chat window per contact: while ACTIVE and not expired, the AI keeps answering
+ * that contact without needing a keyword. Closed on stop words or when a human takes over.
+ */
+model AiConversation {
+  id             String               @id @default(uuid())
+  workspaceId    String
+  workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId       String
+  device         Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /** Phone (E.164-like) when known, otherwise lower-cased JID. */
+  peerKey        String
+  ruleId         String
+  rule           AutoReplyRule        @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  status         AiConversationStatus @default(ACTIVE)
+  startedAt      DateTime             @default(now())
+  lastActivityAt DateTime             @default(now())
+  expiresAt      DateTime
+  updatedAt      DateTime             @updatedAt
+
+  @@unique([workspaceId, deviceId, peerKey])
+  @@index([workspaceId, deviceId, status])
+  @@index([ruleId])
 }

@@ -39,7 +39,7 @@ const openAiSettingsSchema = z
 
 const createBody = z.object({
   name: z.string().min(1).max(200),
-  keyword: z.string().min(1).max(8000),
+  keyword: z.string().max(8000),
   triggerType: triggerTypeSchema,
   caseSensitive: z.boolean(),
   deviceId: z.string().uuid(),
@@ -53,13 +53,15 @@ const createBody = z.object({
   openAiEnabled: z.boolean(),
   openAiSettings: openAiSettingsSchema.optional().nullable(),
   aiSkillId: z.string().uuid().optional().nullable(),
+  conversationHours: z.number().int().min(0).max(24 * 14).optional(),
+  fallbackForNewChats: z.boolean().optional(),
   active: z.boolean(),
 });
 
 const patchBody = z
   .object({
     name: z.string().min(1).max(200).optional(),
-    keyword: z.string().min(1).max(8000).optional(),
+    keyword: z.string().max(8000).optional(),
     triggerType: triggerTypeSchema.optional(),
     caseSensitive: z.boolean().optional(),
     deviceId: z.string().uuid().optional(),
@@ -73,6 +75,8 @@ const patchBody = z
     openAiEnabled: z.boolean().optional(),
     openAiSettings: openAiSettingsSchema.optional().nullable(),
     aiSkillId: z.string().uuid().optional().nullable(),
+    conversationHours: z.number().int().min(0).max(24 * 14).optional(),
+    fallbackForNewChats: z.boolean().optional(),
     active: z.boolean().optional(),
   })
   .refine((o) => Object.keys(o).length > 0, {
