@@ -272,6 +272,7 @@ model Workspace {
   apiCredentials         ApiCredential[]
   notifications          Notification[]
   aiConversations        AiConversation[]
+  conversationFollowUps  ConversationFollowUp[]
 }
 
 /**
@@ -343,6 +344,7 @@ model Device {
   liveChatThreads        LiveChatThread[]
 
   aiConversations        AiConversation[]
+  conversationFollowUps  ConversationFollowUp[]
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
 }
@@ -1112,4 +1114,56 @@ model AiConversation {
   @@unique([workspaceId, deviceId, peerKey])
   @@index([workspaceId, deviceId, status])
   @@index([ruleId])
+}
+
+enum LeadStage {
+  NEW
+  INTERESTED
+  READY_TO_BUY
+  OBJECTION
+  CONVERTED
+  LOST
+}
+
+enum FollowUpStatus {
+  NONE
+  SCHEDULED
+  SENT
+  CANCELED
+}
+
+/**
+ * One row per contact+device: AI summary of the latest finished conversation, the lead stage,
+ * and the planned follow-up (date + message). Reviewed daily on the follow-ups page.
+ */
+model ConversationFollowUp {
+  id                 String         @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId           String
+  device             Device         @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /** Same key as AiConversation.peerKey (phone, else JID). */
+  peerKey            String
+  /** Set only when a phone number is known; required to send a follow-up. */
+  peerPhone          String?
+  peerLabel          String         @default("")
+  stage              LeadStage      @default(NEW)
+  summary            String         @default("") @db.Text
+  needsHuman         Boolean        @default(false)
+  followUpStatus     FollowUpStatus @default(NONE)
+  followUpAt         DateTime?
+  followUpMessage    String?        @db.Text
+  followUpsSent      Int            @default(0)
+  lastFollowUpSentAt DateTime?
+  /** Last time the contact and the AI talked (drives "today's conversations"). */
+  lastConversationAt DateTime
+  analyzedAt         DateTime?
+  /** AiConversation.lastActivityAt that the latest analysis covered. */
+  analyzedActivityAt DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@unique([workspaceId, deviceId, peerKey])
+  @@index([workspaceId, followUpStatus, followUpAt])
+  @@index([workspaceId, lastConversationAt])
 }
