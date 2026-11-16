@@ -3,7 +3,7 @@ import { runAutoRenew } from "../billing/jobs/auto-renew.job";
 import { runRenewalReminders } from "../billing/jobs/renewal-reminders.job";
 import { runUsageAlerts } from "../billing/jobs/usage-alerts.job";
 import { runIdleFreeDeviceCleanup } from "./idle-free-devices.job";
-import { runConversationAnalysis } from "../services/followups.service";
+import { runConversationAnalysis, runFollowUpSender } from "../services/followups.service";
 
 type Job = { name: string; everyMs: number; run: () => Promise<unknown> };
 
@@ -16,6 +16,7 @@ const JOBS: Job[] = [
   { name: "plan-expiry", everyMs: 15 * MINUTE, run: () => expireLapsedPlans() },
   { name: "usage-alerts", everyMs: 60 * MINUTE, run: () => runUsageAlerts() },
   { name: "conversation-analysis", everyMs: 10 * MINUTE, run: () => runConversationAnalysis() },
+  { name: "follow-up-sender", everyMs: 5 * MINUTE, run: () => runFollowUpSender() },
   { name: "idle-free-devices", everyMs: 6 * 60 * MINUTE, run: () => runIdleFreeDeviceCleanup() },
 ];
 

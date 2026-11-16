@@ -273,6 +273,7 @@ model Workspace {
   notifications          Notification[]
   aiConversations        AiConversation[]
   conversationFollowUps  ConversationFollowUp[]
+  followUpSettings       FollowUpSettings?
 }
 
 /**
@@ -1146,6 +1147,8 @@ model ConversationFollowUp {
   peerKey            String
   /** Set only when a phone number is known; required to send a follow-up. */
   peerPhone          String?
+  /** AutoReplyRule that handled the conversation (used to pick the AI credential). */
+  ruleId             String?
   peerLabel          String         @default("")
   stage              LeadStage      @default(NEW)
   summary            String         @default("") @db.Text
@@ -1166,4 +1169,26 @@ model ConversationFollowUp {
   @@unique([workspaceId, deviceId, peerKey])
   @@index([workspaceId, followUpStatus, followUpAt])
   @@index([workspaceId, lastConversationAt])
+}
+
+/** Per-workspace follow-up behaviour. Auto-send is off until the owner turns it on. */
+model FollowUpSettings {
+  workspaceId         String    @id
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  autoSend            Boolean   @default(false)
+  /** IANA timezone used for the send window. */
+  timezone            String    @default("UTC")
+  windowStartHour     Int       @default(9)
+  windowEndHour       Int       @default(21)
+  /** Unanswered follow-ups per contact before the AI stops. */
+  maxFollowUps        Int       @default(3)
+  /** Safety cap: automatic follow-ups per device per 24 hours. */
+  dailyLimitPerDevice Int       @default(30)
+  /** Hours of silence before a conversation is analysed. */
+  idleHours           Int       @default(2)
+  /** Longest wait the AI may choose, in days. */
+  maxDays             Int       @default(30)
+  /** Owner's own guidance for the AI (when and how to follow up). */
+  instructions        String?   @db.Text
+  updatedAt           DateTime  @updatedAt
 }

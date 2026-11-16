@@ -4,6 +4,7 @@ import { AppError } from "../lib/errors";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import * as followUps from "../services/followups.service";
 import { LEAD_STAGES } from "../lib/followup-analysis";
+import { isValidTimezone } from "../lib/followup-schedule";
 
 const router = Router();
 router.use(requireAuth);
@@ -43,6 +44,38 @@ const patchBody = z
   .refine((o) => Object.keys(o).length > 0, {
     message: "At least one field is required",
   });
+
+const settingsBody = z
+  .object({
+    autoSend: z.boolean().optional(),
+    timezone: z.string().max(100).refine(isValidTimezone, "Unknown timezone").optional(),
+    windowStartHour: z.number().int().min(0).max(23).optional(),
+    windowEndHour: z.number().int().min(0).max(23).optional(),
+    maxFollowUps: z.number().int().min(1).max(5).optional(),
+    dailyLimitPerDevice: z.number().int().min(1).max(500).optional(),
+    idleHours: z.number().int().min(1).max(24).optional(),
+    maxDays: z.number().int().min(1).max(90).optional(),
+    instructions: z.string().max(3000).optional(),
+  })
+  .refine((o) => Object.keys(o).length > 0, {
+    message: "At least one field is required",
+  });
+
+// Declared before "/:id" so "settings" is never read as an id.
+router.get(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    res.json({ settings: await followUps.getFollowUpSettings(workspaceId(req)) });
+  })
+);
+
+router.put(
+  "/settings",
+  asyncHandler(async (req, res) => {
+    const body = settingsBody.parse(req.body);
+    res.json({ settings: await followUps.saveFollowUpSettings(workspaceId(req), body) });
+  })
+);
 
 router.get(
   "/",

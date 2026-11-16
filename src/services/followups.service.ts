@@ -11,13 +11,19 @@ import {
   buildTranscript,
   CLOSED_STAGES,
   computeFollowUpAt,
-  DEFAULT_IDLE_HOURS,
   LEAD_STAGES,
-  MAX_FOLLOW_UPS_PER_CONTACT,
   parseAnalysis,
   stretchDays,
+  type AnalysisResult,
+  type LeadStageName,
   type TranscriptLine,
 } from "../lib/followup-analysis";
+import {
+  isValidTimezone,
+  isWithinSendWindow,
+  randomSendGapMs,
+} from "../lib/followup-schedule";
+import { hasHumanRepliedRecently } from "./auto_reply_inbound.service";
 import {
   normalizeOpenAiCompatibleBaseUrl,
   resolveCatalogModelId,
@@ -68,6 +74,82 @@ function toJson(r: ConversationFollowUp): FollowUpJson {
     lastConversationAt: r.lastConversationAt.toISOString(),
     canSend: Boolean(r.peerPhone),
   };
+}
+
+// ───────────────────────── settings ─────────────────────────
+
+export type FollowUpSettingsJson = {
+  /** False until the owner saves settings once (the UI then suggests the browser timezone). */
+  configured: boolean;
+  autoSend: boolean;
+  timezone: string;
+  windowStartHour: number;
+  windowEndHour: number;
+  maxFollowUps: number;
+  dailyLimitPerDevice: number;
+  idleHours: number;
+  maxDays: number;
+  instructions: string;
+};
+
+export const FOLLOW_UP_SETTING_DEFAULTS: FollowUpSettingsJson = {
+  configured: false,
+  autoSend: false,
+  timezone: "UTC",
+  windowStartHour: 9,
+  windowEndHour: 21,
+  maxFollowUps: 3,
+  dailyLimitPerDevice: 30,
+  idleHours: 2,
+  maxDays: 30,
+  instructions: "",
+};
+
+export async function getFollowUpSettings(workspaceId: string): Promise<FollowUpSettingsJson> {
+  const row = await prisma.followUpSettings.findUnique({ where: { workspaceId } });
+  if (!row) return { ...FOLLOW_UP_SETTING_DEFAULTS };
+  return {
+    configured: true,
+    autoSend: row.autoSend,
+    timezone: row.timezone,
+    windowStartHour: row.windowStartHour,
+    windowEndHour: row.windowEndHour,
+    maxFollowUps: row.maxFollowUps,
+    dailyLimitPerDevice: row.dailyLimitPerDevice,
+    idleHours: row.idleHours,
+    maxDays: row.maxDays,
+    instructions: row.instructions ?? "",
+  };
+}
+
+export type SaveFollowUpSettingsInput = Partial<Omit<FollowUpSettingsJson, "configured">>;
+
+export async function saveFollowUpSettings(
+  workspaceId: string,
+  input: SaveFollowUpSettingsInput
+): Promise<FollowUpSettingsJson> {
+  if (input.timezone !== undefined && !isValidTimezone(input.timezone)) {
+    throw new AppError(400, "Unknown timezone", "VALIDATION");
+  }
+  const data = {
+    ...(input.autoSend !== undefined && { autoSend: input.autoSend }),
+    ...(input.timezone !== undefined && { timezone: input.timezone }),
+    ...(input.windowStartHour !== undefined && { windowStartHour: input.windowStartHour }),
+    ...(input.windowEndHour !== undefined && { windowEndHour: input.windowEndHour }),
+    ...(input.maxFollowUps !== undefined && { maxFollowUps: input.maxFollowUps }),
+    ...(input.dailyLimitPerDevice !== undefined && { dailyLimitPerDevice: input.dailyLimitPerDevice }),
+    ...(input.idleHours !== undefined && { idleHours: input.idleHours }),
+    ...(input.maxDays !== undefined && { maxDays: input.maxDays }),
+    ...(input.instructions !== undefined && {
+      instructions: input.instructions.trim().slice(0, 3000) || null,
+    }),
+  };
+  await prisma.followUpSettings.upsert({
+    where: { workspaceId },
+    create: { workspaceId, ...data },
+    update: data,
+  });
+  return getFollowUpSettings(workspaceId);
 }
 
 // ───────────────────────── list / update / send ─────────────────────────
@@ -159,23 +241,18 @@ export async function updateFollowUp(
   return toJson(row);
 }
 
-/** Sends the planned follow-up now. Recorded as an automated message so the AI is not paused. */
-export async function sendFollowUpNow(
-  workspaceId: string,
-  id: string
-): Promise<FollowUpJson> {
-  const row = await prisma.conversationFollowUp.findFirst({ where: { id, workspaceId } });
-  if (!row) throw new AppError(404, "Follow-up not found", "NOT_FOUND");
+/**
+ * Sends the follow-up text and records it in live chat as an automated message, so it is
+ * NOT treated as a human reply (that would pause the AI for 24h). Marks the row SENT.
+ */
+async function deliverFollowUp(row: ConversationFollowUp): Promise<ConversationFollowUp> {
   if (!row.peerPhone) {
     throw new AppError(400, "This contact has no phone number to message", "VALIDATION");
-  }
-  if (CLOSED_STAGES.has(row.stage)) {
-    throw new AppError(400, "Converted or lost contacts cannot be followed up", "VALIDATION");
   }
   const text = row.followUpMessage?.trim();
   if (!text) throw new AppError(400, "Write the follow-up message first", "VALIDATION");
 
-  const outbound = await messaging.sendSingleMessage(workspaceId, {
+  const outbound = await messaging.sendSingleMessage(row.workspaceId, {
     deviceId: row.deviceId,
     toPhone: row.peerPhone,
     kind: "text",
@@ -187,14 +264,14 @@ export async function sendFollowUpNow(
     const thread = await prisma.liveChatThread.upsert({
       where: {
         workspaceId_deviceId_peerPhone: {
-          workspaceId,
+          workspaceId: row.workspaceId,
           deviceId: row.deviceId,
           peerPhone: row.peerPhone,
         },
       },
       update: { lastPreview: text.slice(0, 200), lastMessageAt: now },
       create: {
-        workspaceId,
+        workspaceId: row.workspaceId,
         deviceId: row.deviceId,
         peerPhone: row.peerPhone,
         lastPreview: text.slice(0, 200),
@@ -207,7 +284,6 @@ export async function sendFollowUpNow(
         direction: LiveChatMessageDirection.OUTBOUND,
         bodyText: text,
         outboundMessageId: outbound.id,
-        // automated + bot: must NOT count as a human reply (that would pause the AI for 24h).
         meta: { sender: "bot", automated: true, source: "follow_up" },
       },
     });
@@ -215,15 +291,27 @@ export async function sendFollowUpNow(
     console.warn("[follow-up] failed to record follow-up in live chat", err);
   }
 
-  const updated = await prisma.conversationFollowUp.update({
-    where: { id },
+  return prisma.conversationFollowUp.update({
+    where: { id: row.id },
     data: {
       followUpStatus: "SENT",
       followUpsSent: { increment: 1 },
       lastFollowUpSentAt: now,
     },
   });
-  return toJson(updated);
+}
+
+/** Manual "Send now" from the review page. */
+export async function sendFollowUpNow(
+  workspaceId: string,
+  id: string
+): Promise<FollowUpJson> {
+  const row = await prisma.conversationFollowUp.findFirst({ where: { id, workspaceId } });
+  if (!row) throw new AppError(404, "Follow-up not found", "NOT_FOUND");
+  if (CLOSED_STAGES.has(row.stage)) {
+    throw new AppError(400, "Converted or lost contacts cannot be followed up", "VALIDATION");
+  }
+  return toJson(await deliverFollowUp(row));
 }
 
 // ───────────────────────── AI analysis job ─────────────────────────
@@ -232,12 +320,15 @@ type AnalysisAi = { input: OpenAiSettingsInput; businessContext: string | null }
 
 async function resolveAnalysisAi(
   workspaceId: string,
-  ruleId: string
+  ruleId: string | null,
+  instructions: string
 ): Promise<AnalysisAi | null> {
-  const rule = await prisma.autoReplyRule.findUnique({
-    where: { id: ruleId },
-    include: { aiSkill: { include: { aiCredential: true } } },
-  });
+  const rule = ruleId
+    ? await prisma.autoReplyRule.findUnique({
+        where: { id: ruleId },
+        include: { aiSkill: { include: { aiCredential: true } } },
+      })
+    : null;
 
   let cred = rule?.aiSkill?.aiCredential ?? null;
   if (cred && !cred.active) cred = null;
@@ -259,19 +350,18 @@ async function resolveAnalysisAi(
   if (!input?.apiKey) return null;
 
   const skill = rule?.aiSkill;
-  const businessContext = skill
-    ? [
-        skill.servicesDescription && `Services: ${skill.servicesDescription}`,
-        skill.customInstructions && `Instructions: ${skill.customInstructions}`,
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .slice(0, 3000) || null
-    : null;
+  const context = [
+    skill?.servicesDescription && `Services: ${skill.servicesDescription}`,
+    skill?.customInstructions && `Skill instructions: ${skill.customInstructions}`,
+    instructions.trim() && `Owner's follow-up guidance (follow this first): ${instructions.trim()}`,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 4000);
 
   return {
     input: { ...input, temperature: 0.2, maxTokens: 700 },
-    businessContext,
+    businessContext: context || null,
   };
 }
 
@@ -297,6 +387,76 @@ async function loadTranscript(
   return { lines, label: thread.peerLabel };
 }
 
+type PlanResult = {
+  label: string;
+  result: AnalysisResult;
+  stage: LeadStage;
+  planned: {
+    followUpStatus: "SCHEDULED" | "NONE" | "CANCELED";
+    followUpAt: Date | null;
+    followUpMessage: string | null;
+  };
+};
+
+/**
+ * Reads the conversation, asks the AI for summary/stage/follow-up and turns it into a plan.
+ * Returns null when there is nothing to analyse (no transcript yet).
+ */
+async function planFollowUp(args: {
+  workspaceId: string;
+  deviceId: string;
+  peerPhone: string;
+  ruleId: string | null;
+  sentSoFar: number;
+  existingStage: LeadStage | null;
+  settings: FollowUpSettingsJson;
+}): Promise<PlanResult | null> {
+  const ai = await resolveAnalysisAi(args.workspaceId, args.ruleId, args.settings.instructions);
+  if (!ai) throw new Error("no AI credential available");
+
+  const { lines, label } = await loadTranscript(args.workspaceId, args.deviceId, args.peerPhone);
+  const transcript = buildTranscript(lines);
+  if (!transcript) return null;
+
+  const raw = await generateOpenAiReply(
+    {
+      ...ai.input,
+      systemPrompt: buildAnalysisSystemPrompt({
+        businessContext: ai.businessContext,
+        followUpNumber: args.sentSoFar + 1,
+        maxDays: args.settings.maxDays,
+      }),
+    },
+    `Conversation:\n${transcript}\n\nReturn the JSON now.`
+  );
+  const result = parseAnalysis(raw, { maxDays: args.settings.maxDays });
+  if (!result) throw new Error("AI returned an unreadable analysis");
+
+  // A contact the owner marked CONVERTED stays converted; everything else follows the AI.
+  const stage: LeadStage =
+    args.existingStage === "CONVERTED" ? "CONVERTED" : (result.stage as LeadStageName);
+  const closed = CLOSED_STAGES.has(stage);
+  const limitReached = args.sentSoFar >= args.settings.maxFollowUps;
+  const schedule =
+    !closed && !limitReached && result.followUpDays !== null && result.followUpMessage !== null;
+
+  const planned = schedule
+    ? {
+        followUpStatus: "SCHEDULED" as const,
+        followUpAt: computeFollowUpAt(
+          new Date(),
+          stretchDays(result.followUpDays!, args.sentSoFar, args.settings.maxDays)
+        ),
+        followUpMessage: result.followUpMessage,
+      }
+    : {
+        followUpStatus: closed ? ("CANCELED" as const) : ("NONE" as const),
+        followUpAt: null,
+        followUpMessage: null,
+      };
+  return { label, result, stage, planned };
+}
+
 /** Skip conversations whose analysis recently failed (avoids hammering a broken AI key). */
 const retryAfter = new Map<string, number>();
 const RETRY_DELAY_MS = 30 * 60_000;
@@ -304,11 +464,12 @@ const BATCH = 25;
 
 export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
   const now = Date.now();
-  const idleBefore = new Date(now - DEFAULT_IDLE_HOURS * 3_600_000);
   const notOlderThan = new Date(now - 14 * 24 * 3_600_000);
-
+  // Shortest allowed idle time is 1h; each workspace's own idleHours is applied below.
   const candidates = await prisma.aiConversation.findMany({
-    where: { lastActivityAt: { lte: idleBefore, gte: notOlderThan } },
+    where: {
+      lastActivityAt: { lte: new Date(now - 3_600_000), gte: notOlderThan },
+    },
     orderBy: { lastActivityAt: "desc" },
     take: 200,
   });
@@ -325,6 +486,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
   );
 
   const aiAllowed = new Map<string, boolean>();
+  const settingsByWs = new Map<string, FollowUpSettingsJson>();
   let analyzed = 0;
 
   for (const conv of candidates) {
@@ -341,18 +503,16 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
     }
     if (!aiAllowed.get(conv.workspaceId)) continue;
 
+    let settings = settingsByWs.get(conv.workspaceId);
+    if (!settings) {
+      settings = await getFollowUpSettings(conv.workspaceId);
+      settingsByWs.set(conv.workspaceId, settings);
+    }
+    if (conv.lastActivityAt.getTime() > now - settings.idleHours * 3_600_000) continue;
+
     try {
       const peerPhone = conv.peerKey.startsWith("+") ? conv.peerKey : null;
       if (!peerPhone) {
-        retryAfter.set(conv.id, now + 24 * 3_600_000);
-        continue;
-      }
-      const ai = await resolveAnalysisAi(conv.workspaceId, conv.ruleId);
-      if (!ai) throw new Error("no AI credential available");
-
-      const { lines, label } = await loadTranscript(conv.workspaceId, conv.deviceId, peerPhone);
-      const transcript = buildTranscript(lines);
-      if (!transcript) {
         retryAfter.set(conv.id, now + 24 * 3_600_000);
         continue;
       }
@@ -363,47 +523,28 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
         conv.lastActivityAt > existing.lastFollowUpSentAt;
       const sentSoFar = answeredFollowUp ? 0 : existing?.followUpsSent ?? 0;
 
-      const raw = await generateOpenAiReply(
-        {
-          ...ai.input,
-          systemPrompt: buildAnalysisSystemPrompt({
-            businessContext: ai.businessContext,
-            followUpNumber: sentSoFar + 1,
-          }),
-        },
-        `Conversation:\n${transcript}\n\nReturn the JSON now.`
-      );
-      const result = parseAnalysis(raw);
-      if (!result) throw new Error("AI returned an unreadable analysis");
-
-      const stage: LeadStage =
-        existing?.stage === "CONVERTED" ? "CONVERTED" : result.stage;
-      const limitReached = sentSoFar >= MAX_FOLLOW_UPS_PER_CONTACT;
-      const schedule =
-        !CLOSED_STAGES.has(stage) &&
-        !limitReached &&
-        result.followUpDays !== null &&
-        result.followUpMessage !== null;
-
-      const planned = schedule
-        ? {
-            followUpStatus: "SCHEDULED" as const,
-            followUpAt: computeFollowUpAt(new Date(), stretchDays(result.followUpDays!, sentSoFar)),
-            followUpMessage: result.followUpMessage,
-          }
-        : {
-            followUpStatus: CLOSED_STAGES.has(stage) ? ("CANCELED" as const) : ("NONE" as const),
-            followUpAt: null,
-            followUpMessage: null,
-          };
+      const plan = await planFollowUp({
+        workspaceId: conv.workspaceId,
+        deviceId: conv.deviceId,
+        peerPhone,
+        ruleId: conv.ruleId,
+        sentSoFar,
+        existingStage: existing?.stage ?? null,
+        settings,
+      });
+      if (!plan) {
+        retryAfter.set(conv.id, now + 24 * 3_600_000);
+        continue;
+      }
 
       const common = {
         peerPhone,
-        peerLabel: label,
-        stage,
-        summary: result.summary,
-        needsHuman: result.needsHuman,
-        ...planned,
+        peerLabel: plan.label,
+        ruleId: conv.ruleId,
+        stage: plan.stage,
+        summary: plan.result.summary,
+        needsHuman: plan.result.needsHuman,
+        ...plan.planned,
         followUpsSent: sentSoFar,
         lastConversationAt: conv.lastActivityAt,
         analyzedAt: new Date(),
@@ -439,6 +580,156 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
     for (const [k, t] of retryAfter) if (t < now) retryAfter.delete(k);
   }
   return { analyzed };
+}
+
+// ───────────────────────── automatic sender ─────────────────────────
+
+const SENDS_PER_RUN = 20;
+/** Lease/backoff: a due follow-up that is skipped or fails is looked at again after this. */
+const LEASE_MS = 30 * 60_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function customerWroteSince(
+  workspaceId: string,
+  deviceId: string,
+  peerPhone: string,
+  since: Date
+): Promise<boolean> {
+  const thread = await prisma.liveChatThread.findUnique({
+    where: { workspaceId_deviceId_peerPhone: { workspaceId, deviceId, peerPhone } },
+    select: { id: true },
+  });
+  if (!thread) return false;
+  const latest = await prisma.liveChatMessage.findFirst({
+    where: { threadId: thread.id, direction: LiveChatMessageDirection.INBOUND },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+  return Boolean(latest && latest.createdAt > since);
+}
+
+/** After an unanswered follow-up, let the AI plan the next, later one (until the limit). */
+async function planNextAfterSend(
+  sent: ConversationFollowUp,
+  settings: FollowUpSettingsJson
+): Promise<void> {
+  if (!sent.peerPhone || sent.followUpsSent >= settings.maxFollowUps) return;
+  try {
+    const plan = await planFollowUp({
+      workspaceId: sent.workspaceId,
+      deviceId: sent.deviceId,
+      peerPhone: sent.peerPhone,
+      ruleId: sent.ruleId,
+      sentSoFar: sent.followUpsSent,
+      existingStage: sent.stage,
+      settings,
+    });
+    if (!plan || plan.planned.followUpStatus !== "SCHEDULED") return;
+    await prisma.conversationFollowUp.update({
+      where: { id: sent.id },
+      data: {
+        ...plan.planned,
+        stage: plan.stage,
+        summary: plan.result.summary,
+        needsHuman: plan.result.needsHuman,
+      },
+    });
+  } catch (err) {
+    console.warn(
+      "[follow-up] could not plan the next follow-up:",
+      err instanceof Error ? err.message : err
+    );
+  }
+}
+
+/**
+ * Sends due follow-ups for workspaces that turned auto-send on. Safety rules: only inside
+ * the owner's send window, never to someone a human is chatting with or who just wrote back,
+ * never to contacts flagged "needs you", a per-device daily cap, and a random gap between sends.
+ */
+export async function runFollowUpSender(): Promise<{ sent: number }> {
+  const now = new Date();
+  const due = await prisma.conversationFollowUp.findMany({
+    where: {
+      followUpStatus: "SCHEDULED",
+      followUpAt: { lte: now },
+      stage: { notIn: ["CONVERTED", "LOST"] },
+      needsHuman: false,
+      peerPhone: { not: null },
+    },
+    orderBy: { followUpAt: "asc" },
+    take: 100,
+  });
+  if (due.length === 0) return { sent: 0 };
+
+  const settingsByWs = new Map<string, FollowUpSettingsJson>();
+  const aiAllowed = new Map<string, boolean>();
+  const sentTodayByDevice = new Map<string, number>();
+  let sent = 0;
+
+  for (const row of due) {
+    if (sent >= SENDS_PER_RUN) break;
+
+    let settings = settingsByWs.get(row.workspaceId);
+    if (!settings) {
+      settings = await getFollowUpSettings(row.workspaceId);
+      settingsByWs.set(row.workspaceId, settings);
+    }
+    if (!settings.autoSend) continue;
+    if (!isWithinSendWindow(now, settings.timezone, settings.windowStartHour, settings.windowEndHour)) {
+      continue;
+    }
+    if (!aiAllowed.has(row.workspaceId)) {
+      aiAllowed.set(row.workspaceId, await hasFeature(row.workspaceId, "ai"));
+    }
+    if (!aiAllowed.get(row.workspaceId)) continue;
+
+    if (!sentTodayByDevice.has(row.deviceId)) {
+      sentTodayByDevice.set(
+        row.deviceId,
+        await prisma.conversationFollowUp.count({
+          where: {
+            workspaceId: row.workspaceId,
+            deviceId: row.deviceId,
+            lastFollowUpSentAt: { gte: new Date(now.getTime() - 24 * 3_600_000) },
+          },
+        })
+      );
+    }
+    if ((sentTodayByDevice.get(row.deviceId) ?? 0) >= settings.dailyLimitPerDevice) continue;
+
+    const phone = row.peerPhone!;
+    // Someone is already talking to this customer: leave the follow-up for the owner to decide.
+    if (await hasHumanRepliedRecently(row.workspaceId, row.deviceId, phone)) continue;
+    // The customer wrote back after the analysed chat; the AI will re-plan once it goes quiet.
+    if (await customerWroteSince(row.workspaceId, row.deviceId, phone, row.lastConversationAt)) {
+      continue;
+    }
+
+    // Lease: push the due time forward atomically so two runs never send the same follow-up.
+    const lease = await prisma.conversationFollowUp.updateMany({
+      where: { id: row.id, followUpStatus: "SCHEDULED", followUpAt: row.followUpAt },
+      data: { followUpAt: new Date(now.getTime() + LEASE_MS) },
+    });
+    if (lease.count !== 1) continue;
+
+    try {
+      const updated = await deliverFollowUp(row);
+      sent += 1;
+      sentTodayByDevice.set(row.deviceId, (sentTodayByDevice.get(row.deviceId) ?? 0) + 1);
+      await planNextAfterSend(updated, settings);
+      await sleep(randomSendGapMs());
+    } catch (err) {
+      console.warn(
+        "[follow-up] auto-send failed (will retry later):",
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+  return { sent };
 }
 
 export const LEAD_STAGE_VALUES = LEAD_STAGES;
