@@ -27,7 +27,7 @@ function workspaceId(req: AuthedRequest): string {
 }
 
 const listQuery = z.object({
-  view: z.enum(["today", "scheduled", "converted", "all"]).default("today"),
+  view: z.enum(["today", "suggested", "scheduled", "converted", "all"]).default("today"),
   /** ISO time: start of the user's local day for the "today" view. */
   since: z.string().datetime().optional(),
   deviceId: z.string().uuid().optional(),
@@ -40,6 +40,8 @@ const patchBody = z
     followUpMessage: z.string().max(1500).nullable().optional(),
     followUpStatus: z.enum(["SCHEDULED", "CANCELED"]).optional(),
     needsHuman: z.boolean().optional(),
+    manualLock: z.boolean().optional(),
+    note: z.string().max(1000).nullable().optional(),
   })
   .refine((o) => Object.keys(o).length > 0, {
     message: "At least one field is required",
@@ -48,6 +50,7 @@ const patchBody = z
 const settingsBody = z
   .object({
     autoSend: z.boolean().optional(),
+    aiMode: z.enum(["AUTO", "SUGGEST", "OFF"]).optional(),
     timezone: z.string().max(100).refine(isValidTimezone, "Unknown timezone").optional(),
     windowStartHour: z.number().int().min(0).max(23).optional(),
     windowEndHour: z.number().int().min(0).max(23).optional(),
@@ -74,6 +77,34 @@ router.put(
   asyncHandler(async (req, res) => {
     const body = settingsBody.parse(req.body);
     res.json({ settings: await followUps.saveFollowUpSettings(workspaceId(req), body) });
+  })
+);
+
+const createBody = z.object({
+  deviceId: z.string().uuid(),
+  phone: z.string().min(3).max(40),
+  name: z.string().max(200).nullable().optional(),
+  note: z.string().max(1000).nullable().optional(),
+  followUpAt: z.string().datetime(),
+  followUpMessage: z.string().min(1).max(1500),
+});
+
+router.post(
+  "/",
+  asyncHandler(async (req, res) => {
+    const body = createBody.parse(req.body);
+    const result = await followUps.createManualFollowUp(workspaceId(req), {
+      ...body,
+      followUpAt: new Date(body.followUpAt),
+    });
+    res.status(201).json(result);
+  })
+);
+
+router.post(
+  "/approve-all",
+  asyncHandler(async (req, res) => {
+    res.json(await followUps.approveAllSuggestions(workspaceId(req)));
   })
 );
 
@@ -106,6 +137,8 @@ router.patch(
       followUpMessage: body.followUpMessage,
       followUpStatus: body.followUpStatus,
       needsHuman: body.needsHuman,
+      manualLock: body.manualLock,
+      note: body.note,
     });
     res.json({ item });
   })
@@ -117,6 +150,15 @@ router.post(
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const item = await followUps.sendFollowUpNow(workspaceId(req), id);
     res.json({ item });
+  })
+);
+
+router.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    await followUps.deleteFollowUp(workspaceId(req), id);
+    res.status(204).end();
   })
 );
 
