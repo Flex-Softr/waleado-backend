@@ -5,6 +5,10 @@ import {
 } from "@prisma/client";
 import { assertCountLimit, assertFeature } from "../billing/entitlements.service";
 import {
+  clampConversationHours,
+  DEFAULT_CONVERSATION_HOURS,
+} from "../lib/ai-conversation-routing";
+import {
   parseAutoReplyKeywords,
   parseRegexPatterns,
   parseTriggerTokens,
@@ -48,6 +52,8 @@ export type AutoReplyRuleJson = {
   openAiSettings: Record<string, unknown> | null;
   aiSkillId: string | null;
   aiSkillName: string | null;
+  conversationHours: number;
+  fallbackForNewChats: boolean;
   active: boolean;
   responseCount: number;
   createdAt: string;
@@ -154,6 +160,22 @@ function validateTriggers(
   }
 }
 
+function normalizeConversationHours(v: number | undefined, fallback: number): number {
+  if (v === undefined) return fallback;
+  return clampConversationHours(v);
+}
+
+/** Fallback ("new chats") rules answer without a keyword, so they must be AI rules. */
+function assertFallbackRule(fallbackForNewChats: boolean, isAi: boolean): void {
+  if (fallbackForNewChats && !isAi) {
+    throw new AppError(
+      400,
+      "Only AI rules can answer new chats without a keyword",
+      "VALIDATION"
+    );
+  }
+}
+
 function assertContentRules(input: {
   messageMode: AutoReplyMessageModeApi;
   templateId: string | null;
@@ -197,6 +219,8 @@ function toJson(row: {
   openAiEnabled: boolean;
   openAiSettings: Prisma.JsonValue | null;
   aiSkillId: string | null;
+  conversationHours: number;
+  fallbackForNewChats: boolean;
   active: boolean;
   responseCount: number;
   createdAt: Date;
@@ -225,6 +249,8 @@ function toJson(row: {
     openAiSettings: sanitizeAiSettingsForResponse(row.openAiSettings),
     aiSkillId: row.aiSkillId,
     aiSkillName: row.aiSkill?.name ?? null,
+    conversationHours: row.conversationHours,
+    fallbackForNewChats: row.fallbackForNewChats,
     active: row.active,
     responseCount: row.responseCount,
     createdAt: row.createdAt.toISOString(),
@@ -265,6 +291,10 @@ export type CreateAutoReplyRuleInput = {
   openAiEnabled: boolean;
   openAiSettings?: unknown;
   aiSkillId?: string | null;
+  /** Hours the AI keeps answering a contact without keywords (0 = off). Default 24. */
+  conversationHours?: number;
+  /** Answer private chats that match no keyword. Default false. */
+  fallbackForNewChats?: boolean;
   active: boolean;
 };
 
@@ -318,7 +348,11 @@ export async function createAutoReplyRule(
     throw new AppError(400, "Rule name is required", "VALIDATION");
   }
 
-  validateTriggers(input.triggerType, input.caseSensitive, keyword);
+  const fallbackForNewChats = input.fallbackForNewChats === true;
+  assertFallbackRule(fallbackForNewChats, Boolean(aiSkillId) || input.openAiEnabled);
+  if (keyword || !fallbackForNewChats) {
+    validateTriggers(input.triggerType, input.caseSensitive, keyword);
+  }
 
   assertContentRules({
     messageMode: input.messageMode,
@@ -359,6 +393,11 @@ export async function createAutoReplyRule(
           ? undefined
           : (input.openAiSettings as Prisma.InputJsonValue),
       aiSkillId,
+      conversationHours: normalizeConversationHours(
+        input.conversationHours,
+        DEFAULT_CONVERSATION_HOURS
+      ),
+      fallbackForNewChats,
       active: input.active,
     },
     include,
@@ -447,7 +486,11 @@ export async function updateAutoReplyRule(
     const t = input.keyword.trim();
     const tt = input.triggerType ?? fromPrismaTriggerType(existing.triggerType);
     const cs = input.caseSensitive ?? existing.caseSensitive;
-    validateTriggers(tt, cs, t);
+    const willBeFallback =
+      input.fallbackForNewChats ?? existing.fallbackForNewChats;
+    if (t || !willBeFallback) {
+      validateTriggers(tt, cs, t);
+    }
     data.keyword = t.slice(0, 8000);
   }
   if (input.triggerType !== undefined) {
@@ -507,6 +550,12 @@ export async function updateAutoReplyRule(
         ? Prisma.JsonNull
         : (input.openAiSettings as Prisma.InputJsonValue);
   }
+  if (input.conversationHours !== undefined) {
+    data.conversationHours = clampConversationHours(input.conversationHours);
+  }
+  if (input.fallbackForNewChats !== undefined) {
+    data.fallbackForNewChats = input.fallbackForNewChats;
+  }
   if (input.active !== undefined) {
     data.active = input.active;
   }
@@ -532,6 +581,11 @@ export async function updateAutoReplyRule(
         ? input.openAiEnabled
         : (aiSkillId !== undefined && aiSkillId !== null ? true : existing.openAiEnabled),
   };
+
+  assertFallbackRule(
+    input.fallbackForNewChats ?? existing.fallbackForNewChats,
+    merged.openAiEnabled || Boolean(merged.aiSkillId)
+  );
 
   assertContentRules({
     messageMode: merged.messageMode,

@@ -271,6 +271,9 @@ model Workspace {
   aiSkills               AiSkill[]
   apiCredentials         ApiCredential[]
   notifications          Notification[]
+  aiConversations        AiConversation[]
+  conversationFollowUps  ConversationFollowUp[]
+  followUpSettings       FollowUpSettings?
 }
 
 /**
@@ -341,6 +344,8 @@ model Device {
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
 
+  aiConversations        AiConversation[]
+  conversationFollowUps  ConversationFollowUp[]
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
 }
@@ -523,8 +528,18 @@ model AutoReplyRule {
   openAiSettings  Json?
   aiSkillId       String?
   aiSkill         AiSkill?             @relation(fields: [aiSkillId], references: [id], onDelete: SetNull)
+  /**
+   * AI rules only: after this rule's AI replies, keep answering that contact without keywords
+   * for this many hours (rolling, from the last AI reply). 0 disables continuous conversation.
+   */
+  conversationHours   Int              @default(24)
+  /**
+   * AI rules only: answer private chats that match no keyword (new chats). Off by default.
+   */
+  fallbackForNewChats Boolean          @default(false)
   active          Boolean              @default(true)
   responseCount   Int                  @default(0)
+  aiConversations AiConversation[]
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -1070,4 +1085,110 @@ model BillingAuditLog {
   createdAt   DateTime @default(now())
 
   @@index([workspaceId, createdAt])
+}
+
+enum AiConversationStatus {
+  ACTIVE
+  CLOSED
+}
+
+/**
+ * Persistent AI chat window per contact: while ACTIVE and not expired, the AI keeps answering
+ * that contact without needing a keyword. Closed on stop words or when a human takes over.
+ */
+model AiConversation {
+  id             String               @id @default(uuid())
+  workspaceId    String
+  workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId       String
+  device         Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /** Phone (E.164-like) when known, otherwise lower-cased JID. */
+  peerKey        String
+  ruleId         String
+  rule           AutoReplyRule        @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  status         AiConversationStatus @default(ACTIVE)
+  startedAt      DateTime             @default(now())
+  lastActivityAt DateTime             @default(now())
+  expiresAt      DateTime
+  updatedAt      DateTime             @updatedAt
+
+  @@unique([workspaceId, deviceId, peerKey])
+  @@index([workspaceId, deviceId, status])
+  @@index([ruleId])
+}
+
+enum LeadStage {
+  NEW
+  INTERESTED
+  READY_TO_BUY
+  OBJECTION
+  CONVERTED
+  LOST
+}
+
+enum FollowUpStatus {
+  NONE
+  SCHEDULED
+  SENT
+  CANCELED
+}
+
+/**
+ * One row per contact+device: AI summary of the latest finished conversation, the lead stage,
+ * and the planned follow-up (date + message). Reviewed daily on the follow-ups page.
+ */
+model ConversationFollowUp {
+  id                 String         @id @default(uuid())
+  workspaceId        String
+  workspace          Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId           String
+  device             Device         @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /** Same key as AiConversation.peerKey (phone, else JID). */
+  peerKey            String
+  /** Set only when a phone number is known; required to send a follow-up. */
+  peerPhone          String?
+  /** AutoReplyRule that handled the conversation (used to pick the AI credential). */
+  ruleId             String?
+  peerLabel          String         @default("")
+  stage              LeadStage      @default(NEW)
+  summary            String         @default("") @db.Text
+  needsHuman         Boolean        @default(false)
+  followUpStatus     FollowUpStatus @default(NONE)
+  followUpAt         DateTime?
+  followUpMessage    String?        @db.Text
+  followUpsSent      Int            @default(0)
+  lastFollowUpSentAt DateTime?
+  /** Last time the contact and the AI talked (drives "today's conversations"). */
+  lastConversationAt DateTime
+  analyzedAt         DateTime?
+  /** AiConversation.lastActivityAt that the latest analysis covered. */
+  analyzedActivityAt DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@unique([workspaceId, deviceId, peerKey])
+  @@index([workspaceId, followUpStatus, followUpAt])
+  @@index([workspaceId, lastConversationAt])
+}
+
+/** Per-workspace follow-up behaviour. Auto-send is off until the owner turns it on. */
+model FollowUpSettings {
+  workspaceId         String    @id
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  autoSend            Boolean   @default(false)
+  /** IANA timezone used for the send window. */
+  timezone            String    @default("UTC")
+  windowStartHour     Int       @default(9)
+  windowEndHour       Int       @default(21)
+  /** Unanswered follow-ups per contact before the AI stops. */
+  maxFollowUps        Int       @default(3)
+  /** Safety cap: automatic follow-ups per device per 24 hours. */
+  dailyLimitPerDevice Int       @default(30)
+  /** Hours of silence before a conversation is analysed. */
+  idleHours           Int       @default(2)
+  /** Longest wait the AI may choose, in days. */
+  maxDays             Int       @default(30)
+  /** Owner's own guidance for the AI (when and how to follow up). */
+  instructions        String?   @db.Text
+  updatedAt           DateTime  @updatedAt
 }

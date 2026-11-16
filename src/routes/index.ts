@@ -22,6 +22,7 @@ import {
   aiCredentialsRouter,
 } from "./ai-credentials.routes";
 import { aiSkillsRouter } from "./ai-skills.routes";
+import { followUpsRouter } from "./follow-ups.routes";
 import { notificationsRouter } from "./notifications.routes";
 import {
   requireActiveSubscription,
@@ -65,5 +66,6 @@ apiRouter.use("/chatbot-flows", requireFeature("chatbot"), chatbotFlowsRouter);
 apiRouter.use("/ai-credentials", requireFeature("ai"), aiCredentialsRouter);
 apiRouter.use("/ai-skills", requireFeature("ai"), aiSkillsRouter);
 apiRouter.use("/ai", requireFeature("ai"), aiCatalogRouter);
+apiRouter.use("/follow-ups", requireFeature("ai"), followUpsRouter);
 
 export { apiRouter };
