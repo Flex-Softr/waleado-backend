@@ -40,5 +40,6 @@ VOLUME ["/app/.wa-sessions", "/app/uploads"]
 USER node
 
 EXPOSE 5001
-CMD ["node", "dist/index.js"]
+# Apply pending database migrations (all idempotent) before the API starts.
+CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && exec node dist/index.js"]
 

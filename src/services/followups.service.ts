@@ -617,17 +617,89 @@ const retryAfter = new Map<string, number>();
 const RETRY_DELAY_MS = 30 * 60_000;
 const BATCH = 25;
 
-export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
-  const now = Date.now();
-  const notOlderThan = new Date(now - 14 * 24 * 3_600_000);
-  // Shortest allowed idle time is 1h; each workspace's own idleHours is applied below.
-  const candidates = await prisma.aiConversation.findMany({
-    where: {
-      lastActivityAt: { lte: new Date(now - 3_600_000), gte: notOlderThan },
-    },
+type AnalysisCandidate = {
+  workspaceId: string;
+  deviceId: string;
+  peerKey: string;
+  /** AI rule that handled the chat, when the AI took part (picks the AI credential). */
+  ruleId: string | null;
+  /** When the conversation last moved; follow-ups we send never count as activity. */
+  lastActivityAt: Date;
+};
+
+/**
+ * Every recent private chat is a candidate, not only the ones the AI answered: chats the owner
+ * handled by hand or with a template rule need follow-ups too. For live-chat threads the
+ * activity time is the customer's last message, so our own follow-ups never look like a reply.
+ */
+export async function loadAnalysisCandidates(now: number, notOlderThan: Date): Promise<AnalysisCandidate[]> {
+  // Shortest allowed idle time is 1h; each workspace's own idleHours is applied by the caller.
+  const idleCutoff = now - 3_600_000;
+  const byKey = new Map<string, AnalysisCandidate>();
+
+  const aiConvs = await prisma.aiConversation.findMany({
+    where: { lastActivityAt: { lte: new Date(idleCutoff), gte: notOlderThan } },
     orderBy: { lastActivityAt: "desc" },
     take: 200,
   });
+  for (const c of aiConvs) {
+    byKey.set(`${c.workspaceId}|${c.deviceId}|${c.peerKey}`, {
+      workspaceId: c.workspaceId,
+      deviceId: c.deviceId,
+      peerKey: c.peerKey,
+      ruleId: c.ruleId,
+      lastActivityAt: c.lastActivityAt,
+    });
+  }
+
+  // Latest customer message per thread. No upper bound here: a thread whose customer wrote
+  // again a minute ago must not be analysed on an older message.
+  const lastInbound = await prisma.liveChatMessage.groupBy({
+    by: ["threadId"],
+    where: { direction: LiveChatMessageDirection.INBOUND, createdAt: { gte: notOlderThan } },
+    _max: { createdAt: true },
+    orderBy: { _max: { createdAt: "desc" } },
+    take: 500,
+  });
+  const idle = lastInbound.filter(
+    (g) => g._max.createdAt !== null && g._max.createdAt.getTime() <= idleCutoff
+  );
+  if (idle.length > 0) {
+    const threads = await prisma.liveChatThread.findMany({
+      where: { id: { in: idle.map((g) => g.threadId) } },
+      select: { id: true, workspaceId: true, deviceId: true, peerPhone: true },
+    });
+    const lastByThread = new Map(idle.map((g) => [g.threadId, g._max.createdAt as Date]));
+    for (const t of threads) {
+      if (!t.peerPhone.startsWith("+")) continue;
+      const at = lastByThread.get(t.id);
+      if (!at) continue;
+      const key = `${t.workspaceId}|${t.deviceId}|${t.peerPhone}`;
+      const ai = byKey.get(key);
+      if (ai) {
+        // AI chats keep their rule; use whichever activity is newer.
+        if (at > ai.lastActivityAt) ai.lastActivityAt = at;
+      } else {
+        byKey.set(key, {
+          workspaceId: t.workspaceId,
+          deviceId: t.deviceId,
+          peerKey: t.peerPhone,
+          ruleId: null,
+          lastActivityAt: at,
+        });
+      }
+    }
+  }
+
+  return [...byKey.values()].sort(
+    (a, b) => b.lastActivityAt.getTime() - a.lastActivityAt.getTime()
+  );
+}
+
+export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
+  const now = Date.now();
+  const notOlderThan = new Date(now - 14 * 24 * 3_600_000);
+  const candidates = await loadAnalysisCandidates(now, notOlderThan);
   if (candidates.length === 0) return { analyzed: 0 };
 
   const existingRows = await prisma.conversationFollowUp.findMany({
@@ -651,7 +723,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
     if (existing?.analyzedActivityAt && existing.analyzedActivityAt >= conv.lastActivityAt) {
       continue;
     }
-    if ((retryAfter.get(conv.id) ?? 0) > now) continue;
+    if ((retryAfter.get(key) ?? 0) > now) continue;
 
     if (!aiAllowed.has(conv.workspaceId)) {
       aiAllowed.set(conv.workspaceId, await hasFeature(conv.workspaceId, "ai"));
@@ -670,7 +742,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
     try {
       const peerPhone = conv.peerKey.startsWith("+") ? conv.peerKey : null;
       if (!peerPhone) {
-        retryAfter.set(conv.id, now + 24 * 3_600_000);
+        retryAfter.set(key, now + 24 * 3_600_000);
         continue;
       }
 
@@ -690,7 +762,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
         settings,
       });
       if (!plan) {
-        retryAfter.set(conv.id, now + 24 * 3_600_000);
+        retryAfter.set(key, now + 24 * 3_600_000);
         continue;
       }
 
@@ -727,7 +799,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
       });
       analyzed += 1;
     } catch (err) {
-      retryAfter.set(conv.id, now + RETRY_DELAY_MS);
+      retryAfter.set(key, now + RETRY_DELAY_MS);
       console.warn(
         "[follow-up] analysis failed:",
         err instanceof Error ? err.message : err
