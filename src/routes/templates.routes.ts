@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AppError } from "../lib/errors";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import * as templates from "../services/templates.service";
+import { rewriteTemplateText, TEMPLATE_AI_ACTIONS } from "../services/template_ai.service";
 import {
   createTemplateMediaMulter,
   getAssetFilePath,
@@ -52,9 +53,18 @@ const buttonSchema = z.object({
   label: z.string().min(1).max(200),
 });
 
+const libraryFields = {
+  tags: z.array(z.string().max(60)).max(20).optional(),
+  versions: z.array(z.string().max(4096)).max(10).optional(),
+  variables: z.array(z.object({ key: z.string().max(40), value: z.string().max(300) })).max(30).optional(),
+  showIn: z.array(z.string().max(30)).max(10).optional(),
+};
+
 const createBody = z.object({
+  ...libraryFields,
   name: z.string().min(1).max(200),
-  category: z.enum(["general", "marketing", "transactional", "utility"]),
+  /** Folder name (free text; empty → "general"). */
+  category: z.string().max(60).optional(),
   typeId: z.string().min(1).max(64),
   content: z.string().max(4096).optional(),
   footer: z.string().max(500).optional().nullable(),
@@ -66,8 +76,9 @@ const createBody = z.object({
 });
 
 const patchBody = z.object({
+  ...libraryFields,
   name: z.string().min(1).max(200).optional(),
-  category: z.enum(["general", "marketing", "transactional", "utility"]).optional(),
+  category: z.string().max(60).optional(),
   content: z.string().max(4096).optional(),
   footer: z.string().max(500).optional().nullable(),
   buttons: z.array(buttonSchema).max(5).optional(),
@@ -157,7 +168,7 @@ router.post(
     const body = createBody.parse(req.body);
     const row = await templates.createTemplate(auth.wid, {
       name: body.name,
-      category: body.category,
+      category: body.category ?? "general",
       typeId: body.typeId,
       content: body.content ?? "",
       footer: body.footer,
@@ -165,8 +176,63 @@ router.post(
       media: body.media,
       waTemplateName: body.waTemplateName,
       language: body.language,
+      tags: body.tags,
+      versions: body.versions,
+      variables: body.variables,
+      showIn: body.showIn,
     });
     res.status(201).json({ template: row });
+  })
+);
+
+const aiBody = z.object({
+  action: z.enum(TEMPLATE_AI_ACTIONS),
+  text: z.string().max(4096).optional(),
+  prompt: z.string().max(1000).optional(),
+  avoid: z.array(z.string().max(4096)).max(5).optional(),
+});
+
+router.post(
+  "/ai",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    res.json(await rewriteTemplateText(auth.wid, aiBody.parse(req.body)));
+  })
+);
+
+router.get(
+  "/examples",
+  asyncHandler(async (_req, res) => {
+    res.json({
+      examples: templates.TEMPLATE_EXAMPLES.map((e) => ({
+        key: e.key,
+        name: e.name,
+        category: e.category,
+        body: e.body,
+        versions: e.versions.length + 1,
+      })),
+    });
+  })
+);
+
+router.post(
+  "/examples",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    const { keys } = z.object({ keys: z.array(z.string().max(60)).min(1).max(20) }).parse(req.body);
+    res.status(201).json({ templates: await templates.addTemplateExamples(auth.wid, keys) });
+  })
+);
+
+router.post(
+  "/:id/duplicate",
+  asyncHandler(async (req, res) => {
+    const auth = req.auth;
+    if (!auth) throw new AppError(401, "Unauthorized", "UNAUTHORIZED");
+    const { id } = idParams.parse(req.params);
+    res.status(201).json({ template: await templates.duplicateTemplate(auth.wid, id) });
   })
 );
 

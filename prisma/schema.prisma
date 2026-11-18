@@ -601,6 +601,22 @@ model MessageTemplate {
    * When false, hidden from send/campaign pickers; existing automations may still reference the id.
    */
   active                Boolean                @default(true)
+  /**
+   * Free-form labels for filtering (lower-case).
+   */
+  tags                  String[]               @default([])
+  /**
+   * Alternate wordings of `body`; one version is picked at random per send.
+   */
+  versions              String[]               @default([])
+  /**
+   * [{key, value}]: custom variables, and fallbacks for built-ins ({name}, {phone}).
+   */
+  variables             Json?
+  /**
+   * Pickers that list this template: follow_up, auto_reply, campaign, live_chat.
+   */
+  showIn                String[]               @default(["follow_up", "auto_reply", "campaign", "live_chat"])
   createdAt             DateTime               @default(now())
   updatedAt             DateTime               @updatedAt
   outboundMessages      OutboundMessage[]

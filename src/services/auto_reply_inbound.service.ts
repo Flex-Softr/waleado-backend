@@ -33,7 +33,9 @@ import {
 import {
   buildAutoReplyMediaContent,
   buildTemplateWhatsAppContent,
+  resolveTemplateForSend,
 } from "./wa-outbound-content";
+import { templateContextFor } from "./template_context.service";
 import { decodeLiveChatBodyText } from "./live_chat_message_codec";
 import {
   chooseRule,
@@ -892,11 +894,10 @@ async function buildAutoReplyPayload(
   const mode = rule.messageMode;
   if (mode === "TEMPLATE" && rule.template) {
     try {
-      const payload = await buildTemplateWhatsAppContent(
-        workspaceId,
-        rule.template
-      );
-      const textContent = replyBodyForRule(rule);
+      const ctx = await templateContextFor(workspaceId, peerPhone, deviceId);
+      const tpl = resolveTemplateForSend(rule.template, ctx);
+      const payload = await buildTemplateWhatsAppContent(workspaceId, tpl, ctx, true);
+      const textContent = tpl.body?.trim() || replyBodyForRule(rule);
       return { payload, textContent };
     } catch (e) {
       console.error("[auto-reply] template send build failed", e);
