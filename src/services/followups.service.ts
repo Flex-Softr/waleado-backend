@@ -24,6 +24,7 @@ import {
   randomSendGapMs,
 } from "../lib/followup-schedule";
 import { hasHumanRepliedRecently } from "./auto_reply_inbound.service";
+import { validateAndFormatPhone } from "../lib/phone";
 import {
   normalizeOpenAiCompatibleBaseUrl,
   resolveCatalogModelId,
@@ -46,7 +47,12 @@ export type FollowUpJson = {
   stage: LeadStage;
   summary: string;
   needsHuman: boolean;
-  followUpStatus: "NONE" | "SCHEDULED" | "SENT" | "CANCELED";
+  followUpStatus: "NONE" | "SCHEDULED" | "SENT" | "CANCELED" | "SUGGESTED";
+  /** Who added the contact: the AI after a chat, or the owner by hand. */
+  source: "AI" | "MANUAL";
+  /** True when the owner controls the plan (the AI will not change date or message). */
+  manualLock: boolean;
+  note: string;
   followUpAt: string | null;
   followUpMessage: string | null;
   followUpsSent: number;
@@ -67,6 +73,9 @@ function toJson(r: ConversationFollowUp): FollowUpJson {
     summary: r.summary,
     needsHuman: r.needsHuman,
     followUpStatus: r.followUpStatus,
+    source: r.source,
+    manualLock: r.manualLock,
+    note: r.note ?? "",
     followUpAt: r.followUpAt?.toISOString() ?? null,
     followUpMessage: r.followUpMessage,
     followUpsSent: r.followUpsSent,
@@ -82,6 +91,8 @@ export type FollowUpSettingsJson = {
   /** False until the owner saves settings once (the UI then suggests the browser timezone). */
   configured: boolean;
   autoSend: boolean;
+  /** AUTO: AI schedules by itself. SUGGEST: AI drafts, owner approves. OFF: owner only. */
+  aiMode: "AUTO" | "SUGGEST" | "OFF";
   timezone: string;
   windowStartHour: number;
   windowEndHour: number;
@@ -95,6 +106,7 @@ export type FollowUpSettingsJson = {
 export const FOLLOW_UP_SETTING_DEFAULTS: FollowUpSettingsJson = {
   configured: false,
   autoSend: false,
+  aiMode: "SUGGEST",
   timezone: "UTC",
   windowStartHour: 9,
   windowEndHour: 21,
@@ -111,6 +123,7 @@ export async function getFollowUpSettings(workspaceId: string): Promise<FollowUp
   return {
     configured: true,
     autoSend: row.autoSend,
+    aiMode: row.aiMode,
     timezone: row.timezone,
     windowStartHour: row.windowStartHour,
     windowEndHour: row.windowEndHour,
@@ -133,6 +146,7 @@ export async function saveFollowUpSettings(
   }
   const data = {
     ...(input.autoSend !== undefined && { autoSend: input.autoSend }),
+    ...(input.aiMode !== undefined && { aiMode: input.aiMode }),
     ...(input.timezone !== undefined && { timezone: input.timezone }),
     ...(input.windowStartHour !== undefined && { windowStartHour: input.windowStartHour }),
     ...(input.windowEndHour !== undefined && { windowEndHour: input.windowEndHour }),
@@ -154,7 +168,7 @@ export async function saveFollowUpSettings(
 
 // ───────────────────────── list / update / send ─────────────────────────
 
-export type FollowUpView = "today" | "scheduled" | "converted" | "all";
+export type FollowUpView = "today" | "suggested" | "scheduled" | "converted" | "all";
 
 export async function listFollowUps(
   workspaceId: string,
@@ -168,6 +182,9 @@ export async function listFollowUps(
     where.lastConversationAt = {
       gte: opts.since ?? new Date(Date.now() - 24 * 3_600_000),
     };
+  } else if (opts.view === "suggested") {
+    where.followUpStatus = "SUGGESTED";
+    orderBy = [{ followUpAt: "asc" }];
   } else if (opts.view === "scheduled") {
     where.followUpStatus = "SCHEDULED";
     orderBy = [{ followUpAt: "asc" }];
@@ -189,6 +206,9 @@ export type UpdateFollowUpInput = {
   followUpMessage?: string | null;
   followUpStatus?: "SCHEDULED" | "CANCELED";
   needsHuman?: boolean;
+  /** true = owner controls the plan; false = hand the plan back to the AI. */
+  manualLock?: boolean;
+  note?: string | null;
 };
 
 export async function updateFollowUp(
@@ -215,6 +235,24 @@ export async function updateFollowUp(
     data.followUpMessage = t ? t.slice(0, 1500) : null;
   }
   if (input.needsHuman !== undefined) data.needsHuman = input.needsHuman;
+  if (input.note !== undefined) {
+    data.note = input.note?.trim().slice(0, 1000) || null;
+  }
+
+  // The owner changing the date or message makes it the owner's plan: lock it from the AI.
+  const dateChanged =
+    input.followUpAt !== undefined &&
+    (input.followUpAt?.getTime() ?? null) !== (existing.followUpAt?.getTime() ?? null);
+  const messageChanged =
+    data.followUpMessage !== undefined && data.followUpMessage !== existing.followUpMessage;
+  if (input.manualLock === false) {
+    data.manualLock = false;
+    // Let the next analysis run re-plan this contact.
+    data.analyzedActivityAt = null;
+  } else if (input.manualLock === true || dateChanged || messageChanged) {
+    data.manualLock = true;
+    data.plannedAt = new Date();
+  }
 
   const nextStage = (data.stage as LeadStage | undefined) ?? existing.stage;
   if (input.followUpStatus === "CANCELED") {
@@ -239,6 +277,121 @@ export async function updateFollowUp(
 
   const row = await prisma.conversationFollowUp.update({ where: { id }, data });
   return toJson(row);
+}
+
+export type CreateManualFollowUpInput = {
+  deviceId: string;
+  phone: string;
+  name?: string | null;
+  note?: string | null;
+  followUpAt: Date;
+  followUpMessage: string;
+};
+
+/**
+ * Owner adds a number to follow-up by hand (or re-plans an existing contact). One row per
+ * contact per device: adding the same number again updates it. The plan is locked from the AI.
+ */
+export async function createManualFollowUp(
+  workspaceId: string,
+  input: CreateManualFollowUpInput
+): Promise<{ item: FollowUpJson; everMessaged: boolean }> {
+  const phone = validateAndFormatPhone(input.phone);
+  if (!phone.valid) {
+    throw new AppError(400, phone.message, "INVALID_PHONE");
+  }
+  const peerPhone = phone.e164.startsWith("+") ? phone.e164 : `+${phone.e164}`;
+  const message = input.followUpMessage.trim().slice(0, 1500);
+  if (!message) throw new AppError(400, "Write the follow-up message", "VALIDATION");
+  if (Number.isNaN(input.followUpAt.getTime())) {
+    throw new AppError(400, "Pick a follow-up date", "VALIDATION");
+  }
+
+  const device = await prisma.device.findFirst({
+    where: { id: input.deviceId, workspaceId },
+    select: { id: true },
+  });
+  if (!device) throw new AppError(404, "Device not found", "NOT_FOUND");
+
+  const thread = await prisma.liveChatThread.findUnique({
+    where: {
+      workspaceId_deviceId_peerPhone: { workspaceId, deviceId: device.id, peerPhone },
+    },
+    select: { id: true, peerLabel: true },
+  });
+  const everMessaged = thread
+    ? Boolean(
+        await prisma.liveChatMessage.findFirst({
+          where: { threadId: thread.id, direction: LiveChatMessageDirection.INBOUND },
+          select: { id: true },
+        })
+      )
+    : false;
+
+  const key = { workspaceId, deviceId: device.id, peerKey: peerPhone };
+  const existing = await prisma.conversationFollowUp.findUnique({
+    where: { workspaceId_deviceId_peerKey: key },
+  });
+  const now = new Date();
+  const name = input.name?.trim().slice(0, 200) || "";
+  const note = input.note?.trim().slice(0, 1000) || null;
+  const plan = {
+    followUpStatus: "SCHEDULED" as const,
+    followUpAt: input.followUpAt,
+    followUpMessage: message,
+    manualLock: true,
+    plannedAt: now,
+    // A fresh manual plan starts its own count of unanswered follow-ups.
+    followUpsSent: 0,
+  };
+
+  const row = existing
+    ? await prisma.conversationFollowUp.update({
+        where: { id: existing.id },
+        data: {
+          ...plan,
+          peerPhone,
+          ...(name && { peerLabel: name }),
+          ...(note !== null && { note }),
+          // Adding someone back to follow-up reopens a converted / lost contact.
+          ...(CLOSED_STAGES.has(existing.stage) && { stage: "INTERESTED" as const }),
+        },
+      })
+    : await prisma.conversationFollowUp.create({
+        data: {
+          ...key,
+          ...plan,
+          peerPhone,
+          peerLabel: name || thread?.peerLabel || "",
+          note,
+          source: "MANUAL",
+          stage: "NEW",
+          lastConversationAt: now,
+        },
+      });
+  return { item: toJson(row), everMessaged };
+}
+
+/** Removes a contact from the follow-up list for good. */
+export async function deleteFollowUp(workspaceId: string, id: string): Promise<void> {
+  const res = await prisma.conversationFollowUp.deleteMany({ where: { id, workspaceId } });
+  if (res.count === 0) throw new AppError(404, "Follow-up not found", "NOT_FOUND");
+}
+
+/** Approves every AI suggestion that is ready to send (has a date, a message and a phone). */
+export async function approveAllSuggestions(workspaceId: string): Promise<{ approved: number }> {
+  const res = await prisma.conversationFollowUp.updateMany({
+    where: {
+      workspaceId,
+      followUpStatus: "SUGGESTED",
+      followUpAt: { not: null },
+      followUpMessage: { not: null },
+      peerPhone: { not: null },
+      stage: { notIn: ["CONVERTED", "LOST"] },
+    },
+    data: { followUpStatus: "SCHEDULED" },
+  });
+  return { approved: res.count };
 }
 
 /**
@@ -392,7 +545,7 @@ type PlanResult = {
   result: AnalysisResult;
   stage: LeadStage;
   planned: {
-    followUpStatus: "SCHEDULED" | "NONE" | "CANCELED";
+    followUpStatus: "SCHEDULED" | "SUGGESTED" | "NONE" | "CANCELED";
     followUpAt: Date | null;
     followUpMessage: string | null;
   };
@@ -442,7 +595,9 @@ async function planFollowUp(args: {
 
   const planned = schedule
     ? {
-        followUpStatus: "SCHEDULED" as const,
+        // In "suggest" mode the plan waits for the owner's approval before it can be sent.
+        followUpStatus:
+          args.settings.aiMode === "SUGGEST" ? ("SUGGESTED" as const) : ("SCHEDULED" as const),
         followUpAt: computeFollowUpAt(
           new Date(),
           stretchDays(result.followUpDays!, args.sentSoFar, args.settings.maxDays)
@@ -462,17 +617,89 @@ const retryAfter = new Map<string, number>();
 const RETRY_DELAY_MS = 30 * 60_000;
 const BATCH = 25;
 
-export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
-  const now = Date.now();
-  const notOlderThan = new Date(now - 14 * 24 * 3_600_000);
-  // Shortest allowed idle time is 1h; each workspace's own idleHours is applied below.
-  const candidates = await prisma.aiConversation.findMany({
-    where: {
-      lastActivityAt: { lte: new Date(now - 3_600_000), gte: notOlderThan },
-    },
+type AnalysisCandidate = {
+  workspaceId: string;
+  deviceId: string;
+  peerKey: string;
+  /** AI rule that handled the chat, when the AI took part (picks the AI credential). */
+  ruleId: string | null;
+  /** When the conversation last moved; follow-ups we send never count as activity. */
+  lastActivityAt: Date;
+};
+
+/**
+ * Every recent private chat is a candidate, not only the ones the AI answered: chats the owner
+ * handled by hand or with a template rule need follow-ups too. For live-chat threads the
+ * activity time is the customer's last message, so our own follow-ups never look like a reply.
+ */
+export async function loadAnalysisCandidates(now: number, notOlderThan: Date): Promise<AnalysisCandidate[]> {
+  // Shortest allowed idle time is 1h; each workspace's own idleHours is applied by the caller.
+  const idleCutoff = now - 3_600_000;
+  const byKey = new Map<string, AnalysisCandidate>();
+
+  const aiConvs = await prisma.aiConversation.findMany({
+    where: { lastActivityAt: { lte: new Date(idleCutoff), gte: notOlderThan } },
     orderBy: { lastActivityAt: "desc" },
     take: 200,
   });
+  for (const c of aiConvs) {
+    byKey.set(`${c.workspaceId}|${c.deviceId}|${c.peerKey}`, {
+      workspaceId: c.workspaceId,
+      deviceId: c.deviceId,
+      peerKey: c.peerKey,
+      ruleId: c.ruleId,
+      lastActivityAt: c.lastActivityAt,
+    });
+  }
+
+  // Latest customer message per thread. No upper bound here: a thread whose customer wrote
+  // again a minute ago must not be analysed on an older message.
+  const lastInbound = await prisma.liveChatMessage.groupBy({
+    by: ["threadId"],
+    where: { direction: LiveChatMessageDirection.INBOUND, createdAt: { gte: notOlderThan } },
+    _max: { createdAt: true },
+    orderBy: { _max: { createdAt: "desc" } },
+    take: 500,
+  });
+  const idle = lastInbound.filter(
+    (g) => g._max.createdAt !== null && g._max.createdAt.getTime() <= idleCutoff
+  );
+  if (idle.length > 0) {
+    const threads = await prisma.liveChatThread.findMany({
+      where: { id: { in: idle.map((g) => g.threadId) } },
+      select: { id: true, workspaceId: true, deviceId: true, peerPhone: true },
+    });
+    const lastByThread = new Map(idle.map((g) => [g.threadId, g._max.createdAt as Date]));
+    for (const t of threads) {
+      if (!t.peerPhone.startsWith("+")) continue;
+      const at = lastByThread.get(t.id);
+      if (!at) continue;
+      const key = `${t.workspaceId}|${t.deviceId}|${t.peerPhone}`;
+      const ai = byKey.get(key);
+      if (ai) {
+        // AI chats keep their rule; use whichever activity is newer.
+        if (at > ai.lastActivityAt) ai.lastActivityAt = at;
+      } else {
+        byKey.set(key, {
+          workspaceId: t.workspaceId,
+          deviceId: t.deviceId,
+          peerKey: t.peerPhone,
+          ruleId: null,
+          lastActivityAt: at,
+        });
+      }
+    }
+  }
+
+  return [...byKey.values()].sort(
+    (a, b) => b.lastActivityAt.getTime() - a.lastActivityAt.getTime()
+  );
+}
+
+export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
+  const now = Date.now();
+  const notOlderThan = new Date(now - 14 * 24 * 3_600_000);
+  const candidates = await loadAnalysisCandidates(now, notOlderThan);
   if (candidates.length === 0) return { analyzed: 0 };
 
   const existingRows = await prisma.conversationFollowUp.findMany({
@@ -496,7 +723,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
     if (existing?.analyzedActivityAt && existing.analyzedActivityAt >= conv.lastActivityAt) {
       continue;
     }
-    if ((retryAfter.get(conv.id) ?? 0) > now) continue;
+    if ((retryAfter.get(key) ?? 0) > now) continue;
 
     if (!aiAllowed.has(conv.workspaceId)) {
       aiAllowed.set(conv.workspaceId, await hasFeature(conv.workspaceId, "ai"));
@@ -508,12 +735,14 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
       settings = await getFollowUpSettings(conv.workspaceId);
       settingsByWs.set(conv.workspaceId, settings);
     }
+    // "Manual only": the AI neither analyses nor plans anything.
+    if (settings.aiMode === "OFF") continue;
     if (conv.lastActivityAt.getTime() > now - settings.idleHours * 3_600_000) continue;
 
     try {
       const peerPhone = conv.peerKey.startsWith("+") ? conv.peerKey : null;
       if (!peerPhone) {
-        retryAfter.set(conv.id, now + 24 * 3_600_000);
+        retryAfter.set(key, now + 24 * 3_600_000);
         continue;
       }
 
@@ -533,19 +762,21 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
         settings,
       });
       if (!plan) {
-        retryAfter.set(conv.id, now + 24 * 3_600_000);
+        retryAfter.set(key, now + 24 * 3_600_000);
         continue;
       }
 
+      // Owner-locked plans keep their date and message; the AI only refreshes the summary.
+      const locked = existing?.manualLock === true;
       const common = {
         peerPhone,
-        peerLabel: plan.label,
+        peerLabel: plan.label || existing?.peerLabel || "",
         ruleId: conv.ruleId,
         stage: plan.stage,
         summary: plan.result.summary,
         needsHuman: plan.result.needsHuman,
-        ...plan.planned,
-        followUpsSent: sentSoFar,
+        ...(locked ? {} : plan.planned),
+        followUpsSent: locked ? existing.followUpsSent : sentSoFar,
         lastConversationAt: conv.lastActivityAt,
         analyzedAt: new Date(),
         analyzedActivityAt: conv.lastActivityAt,
@@ -568,7 +799,7 @@ export async function runConversationAnalysis(): Promise<{ analyzed: number }> {
       });
       analyzed += 1;
     } catch (err) {
-      retryAfter.set(conv.id, now + RETRY_DELAY_MS);
+      retryAfter.set(key, now + RETRY_DELAY_MS);
       console.warn(
         "[follow-up] analysis failed:",
         err instanceof Error ? err.message : err
@@ -616,6 +847,8 @@ async function planNextAfterSend(
   sent: ConversationFollowUp,
   settings: FollowUpSettingsJson
 ): Promise<void> {
+  // The owner's own plans are never extended by the AI.
+  if (sent.manualLock || settings.aiMode === "OFF") return;
   if (!sent.peerPhone || sent.followUpsSent >= settings.maxFollowUps) return;
   try {
     const plan = await planFollowUp({
@@ -627,7 +860,7 @@ async function planNextAfterSend(
       existingStage: sent.stage,
       settings,
     });
-    if (!plan || plan.planned.followUpStatus !== "SCHEDULED") return;
+    if (!plan || plan.planned.followUpAt === null) return;
     await prisma.conversationFollowUp.update({
       where: { id: sent.id },
       data: {
@@ -703,9 +936,14 @@ export async function runFollowUpSender(): Promise<{ sent: number }> {
 
     const phone = row.peerPhone!;
     // Someone is already talking to this customer: leave the follow-up for the owner to decide.
-    if (await hasHumanRepliedRecently(row.workspaceId, row.deviceId, phone)) continue;
-    // The customer wrote back after the analysed chat; the AI will re-plan once it goes quiet.
-    if (await customerWroteSince(row.workspaceId, row.deviceId, phone, row.lastConversationAt)) {
+    // (Skipped for the owner's own plans: they chose this date knowing about the chat.)
+    if (!row.manualLock && (await hasHumanRepliedRecently(row.workspaceId, row.deviceId, phone))) {
+      continue;
+    }
+    // The customer wrote back after the plan was made: hold it so nothing odd goes out.
+    const plannedSince =
+      row.manualLock && row.plannedAt ? row.plannedAt : row.lastConversationAt;
+    if (await customerWroteSince(row.workspaceId, row.deviceId, phone, plannedSince)) {
       continue;
     }
 

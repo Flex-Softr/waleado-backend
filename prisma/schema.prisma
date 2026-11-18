@@ -1131,6 +1131,20 @@ enum FollowUpStatus {
   SCHEDULED
   SENT
   CANCELED
+  /// AI drafted a date + message that waits for the owner's approval.
+  SUGGESTED
+}
+
+/// Who decides follow-ups: the AI alone, the AI with owner approval, or the owner only.
+enum FollowUpAiMode {
+  AUTO
+  SUGGEST
+  OFF
+}
+
+enum FollowUpSource {
+  AI
+  MANUAL
 }
 
 /**
@@ -1149,6 +1163,14 @@ model ConversationFollowUp {
   peerPhone          String?
   /** AutoReplyRule that handled the conversation (used to pick the AI credential). */
   ruleId             String?
+  /** Who put this contact in the list. */
+  source             FollowUpSource @default(AI)
+  /** Owner controls the plan: the AI never changes its date or message. */
+  manualLock         Boolean        @default(false)
+  /** Owner's private note about this contact. */
+  note               String?        @db.Text
+  /** When the current plan (date + message) was set by the owner. */
+  plannedAt          DateTime?
   peerLabel          String         @default("")
   stage              LeadStage      @default(NEW)
   summary            String         @default("") @db.Text
@@ -1176,6 +1198,7 @@ model FollowUpSettings {
   workspaceId         String    @id
   workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   autoSend            Boolean   @default(false)
+  aiMode              FollowUpAiMode @default(SUGGEST)
   /** IANA timezone used for the send window. */
   timezone            String    @default("UTC")
   windowStartHour     Int       @default(9)
