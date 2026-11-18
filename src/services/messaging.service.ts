@@ -1,4 +1,5 @@
 import { DeviceStatus, OutboundKind, OutboundStatus } from "@prisma/client";
+import { templateContextFor } from "./template_context.service";
 import { assertMessageQuota } from "../billing/entitlements.service";
 import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
@@ -10,7 +11,7 @@ import {
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
 import { requireActiveTemplate } from "./templates.service";
-import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
+import { buildTemplateWhatsAppContent, resolveTemplateForSend } from "./wa-outbound-content";
 import * as waSession from "./wa-device-session.service";
 
 export type SingleSendPayload =
@@ -25,6 +26,8 @@ export type SingleSendPayload =
       toPhone: string;
       kind: "template";
       templateId: string;
+      /** Override {name}; otherwise looked up from live chat / contacts by phone. */
+      templateName?: string | null;
     }
   | {
       deviceId: string;
@@ -158,9 +161,13 @@ export async function sendSingleMessage(
     textToSend = text;
     kind = OutboundKind.TEXT;
   } else if (payload.kind === "template") {
-    const tpl = await requireActiveTemplate(workspaceId, payload.templateId);
+    const rawTpl = await requireActiveTemplate(workspaceId, payload.templateId);
+    const ctx = await templateContextFor(workspaceId, payload.toPhone, payload.deviceId);
+    if (payload.templateName) ctx.name = payload.templateName;
+    // One version, variables filled, so the stored summary is what the customer gets.
+    const tpl = resolveTemplateForSend(rawTpl, ctx);
     try {
-      templateWaContent = await buildTemplateWhatsAppContent(workspaceId, tpl);
+      templateWaContent = await buildTemplateWhatsAppContent(workspaceId, tpl, ctx, true);
     } catch (e) {
       if (e instanceof AppError) throw e;
       const msg = e instanceof Error ? e.message : String(e);

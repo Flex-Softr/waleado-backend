@@ -4,6 +4,15 @@ import { prisma } from "../lib/prisma";
 import { AppError } from "../lib/errors";
 import { isTemplateTypeId, type TemplateTypeId } from "../lib/template-types";
 import { normalizeTemplateMedia } from "../lib/template-media-normalize";
+import {
+  normalizeFolder,
+  normalizeShowIn,
+  normalizeTags,
+  normalizeVersions,
+  parseVariables,
+  type ShowIn,
+  type TemplateVariable,
+} from "../lib/template-render";
 
 const DEFAULT_TEMPLATES: {
   name: string;
@@ -56,6 +65,13 @@ export type TemplateJson = {
   buttons: TemplateInteractiveButtonJson[] | null;
   media: Record<string, unknown> | null;
   active: boolean;
+  tags: string[];
+  /** Alternate wordings of `content`; one is picked at random per send. */
+  versions: string[];
+  variables: TemplateVariable[];
+  showIn: ShowIn[];
+  /** Where the template is used right now (only on list results). */
+  usage?: { autoReplies: number; campaigns: number; followUps: number; callResponders: number };
   createdAt: string;
   updatedAt: string;
 };
@@ -148,8 +164,18 @@ function toJson(t: {
   buttons: Prisma.JsonValue | null;
   media: Prisma.JsonValue | null;
   active: boolean;
+  tags: string[];
+  versions: string[];
+  variables: Prisma.JsonValue | null;
+  showIn: string[];
   createdAt: Date;
   updatedAt: Date;
+  _count?: {
+    autoReplyRules: number;
+    bulkCampaigns: number;
+    conversationFollowUps: number;
+    callResponderRules: number;
+  };
 }): TemplateJson {
   const content = t.body;
   return {
@@ -165,6 +191,20 @@ function toJson(t: {
     buttons: parseButtons(t.buttons),
     media: parseMedia(t.media),
     active: t.active,
+    tags: t.tags ?? [],
+    versions: t.versions ?? [],
+    variables: parseVariables(t.variables),
+    showIn: normalizeShowIn(t.showIn),
+    ...(t._count
+      ? {
+          usage: {
+            autoReplies: t._count.autoReplyRules,
+            campaigns: t._count.bulkCampaigns,
+            followUps: t._count.conversationFollowUps,
+            callResponders: t._count.callResponderRules,
+          },
+        }
+      : {}),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
@@ -211,6 +251,19 @@ export async function listTemplates(workspaceId: string): Promise<TemplateJson[]
   const rows = await prisma.messageTemplate.findMany({
     where: { workspaceId },
     orderBy: { updatedAt: "desc" },
+    include: {
+      _count: {
+        select: {
+          autoReplyRules: true,
+          bulkCampaigns: true,
+          callResponderRules: true,
+          // Only follow-ups still waiting to go out.
+          conversationFollowUps: {
+            where: { followUpStatus: { in: ["SCHEDULED", "SUGGESTED"] } },
+          },
+        },
+      },
+    },
   });
   return rows.map(toJson);
 }
@@ -226,6 +279,10 @@ export type CreateTemplateInput = {
   media?: unknown;
   waTemplateName?: string | null;
   language?: string | null;
+  tags?: string[];
+  versions?: string[];
+  variables?: unknown;
+  showIn?: string[];
 };
 
 export async function createTemplate(
@@ -243,15 +300,8 @@ export async function createTemplate(
   }
   const typeId = input.typeId as TemplateTypeId;
 
-  const allowedCategories = new Set([
-    "general",
-    "marketing",
-    "transactional",
-    "utility",
-  ]);
-  const category = allowedCategories.has(input.category)
-    ? input.category
-    : "general";
+  // Folders are the owner's own names now (the old fixed categories still work as names).
+  const category = normalizeFolder(input.category);
 
   const footer =
     input.footer?.trim() === "" ? null : input.footer?.trim().slice(0, 500) ?? null;
@@ -304,6 +354,12 @@ export async function createTemplate(
         category,
         typeId,
         footer,
+        tags: normalizeTags(input.tags),
+        versions: normalizeVersions(input.versions, content),
+        ...(input.variables !== undefined
+          ? { variables: parseVariables(input.variables) as unknown as Prisma.InputJsonValue }
+          : {}),
+        showIn: normalizeShowIn(input.showIn),
         ...(buttonsJson !== undefined ? { buttons: buttonsJson } : {}),
         ...(mediaJson !== undefined ? { media: mediaJson } : {}),
       },
@@ -327,6 +383,10 @@ export type UpdateTemplateInput = {
   media?: unknown;
   language?: string | null;
   active?: boolean;
+  tags?: string[];
+  versions?: string[];
+  variables?: unknown;
+  showIn?: string[];
 };
 
 export async function updateTemplate(
@@ -348,13 +408,6 @@ export async function updateTemplate(
     throw new AppError(400, "No changes provided", "VALIDATION");
   }
 
-  const allowedCategories = new Set([
-    "general",
-    "marketing",
-    "transactional",
-    "utility",
-  ]);
-
   const data: Prisma.MessageTemplateUpdateInput = {};
 
   if (input.name !== undefined) {
@@ -366,9 +419,7 @@ export async function updateTemplate(
   }
 
   if (input.category !== undefined) {
-    data.category = allowedCategories.has(input.category)
-      ? input.category
-      : "general";
+    data.category = normalizeFolder(input.category);
   }
 
   if (input.content !== undefined) {
@@ -390,6 +441,15 @@ export async function updateTemplate(
   if (input.active !== undefined) {
     data.active = input.active;
   }
+  if (input.tags !== undefined) data.tags = normalizeTags(input.tags);
+  if (input.versions !== undefined) {
+    const primary = input.content !== undefined ? input.content : existing.body;
+    data.versions = normalizeVersions(input.versions, primary);
+  }
+  if (input.variables !== undefined) {
+    data.variables = parseVariables(input.variables) as unknown as Prisma.InputJsonValue;
+  }
+  if (input.showIn !== undefined) data.showIn = normalizeShowIn(input.showIn);
 
   if (input.buttons !== undefined) {
     if (typeId === "message_buttons") {
@@ -451,4 +511,117 @@ export async function deleteTemplate(
     throw new AppError(404, "Template not found", "NOT_FOUND");
   }
   await prisma.messageTemplate.delete({ where: { id: templateId } });
+}
+
+/** Copies a template (new name "… (copy)", inactive state kept). */
+export async function duplicateTemplate(
+  workspaceId: string,
+  templateId: string
+): Promise<TemplateJson> {
+  const t = await prisma.messageTemplate.findFirst({ where: { id: templateId, workspaceId } });
+  if (!t) throw new AppError(404, "Template not found", "NOT_FOUND");
+  await assertCountLimit(workspaceId, "templates", await prisma.messageTemplate.count({ where: { workspaceId } }));
+  const name = `${t.name} (copy)`.slice(0, 200);
+  const row = await prisma.messageTemplate.create({
+    data: {
+      workspaceId,
+      name,
+      waTemplateName: await uniqueWaTemplateName(workspaceId, slugifyWaTemplateName(name)),
+      language: t.language,
+      body: t.body,
+      category: t.category,
+      typeId: t.typeId,
+      footer: t.footer,
+      ...(t.buttons !== null ? { buttons: t.buttons as Prisma.InputJsonValue } : {}),
+      ...(t.media !== null ? { media: t.media as Prisma.InputJsonValue } : {}),
+      active: t.active,
+      tags: t.tags,
+      versions: t.versions,
+      ...(t.variables !== null ? { variables: t.variables as Prisma.InputJsonValue } : {}),
+      showIn: t.showIn,
+    },
+  });
+  return toJson(row);
+}
+
+/** Ready-made starting points offered as "Start from examples". */
+export const TEMPLATE_EXAMPLES: Array<{
+  key: string;
+  name: string;
+  category: string;
+  body: string;
+  versions: string[];
+  tags: string[];
+}> = [
+  {
+    key: "follow_up_question",
+    name: "Follow-up: any questions?",
+    category: "Follow-up",
+    body: "Hi {name}, just checking if you had any questions about what we discussed. Happy to help!",
+    versions: ["Hello {name}! Did you get a chance to think it over? Reply here if anything is unclear."],
+    tags: ["follow-up"],
+  },
+  {
+    key: "follow_up_last",
+    name: "Follow-up: last reminder",
+    category: "Follow-up",
+    body: "Hi {name}, no rush at all. Just letting you know the offer is still open if you would like to go ahead.",
+    versions: [],
+    tags: ["follow-up"],
+  },
+  {
+    key: "greeting",
+    name: "Greeting: new customer",
+    category: "Greeting",
+    body: "Hello {name}, welcome! How can we help you today?",
+    versions: ["Hi {name}, thanks for reaching out. What can we do for you?"],
+    tags: ["greeting"],
+  },
+  {
+    key: "payment_reminder",
+    name: "Payment reminder",
+    category: "Payments",
+    body: "Hi {name}, a friendly reminder that your payment is due. Let us know if you need the payment details again.",
+    versions: [],
+    tags: ["payment"],
+  },
+  {
+    key: "thank_you",
+    name: "Thank you after purchase",
+    category: "Support",
+    body: "Thank you {name}! Your order is confirmed. Save this number and message us any time you need help.",
+    versions: [],
+    tags: ["thank-you"],
+  },
+  {
+    key: "away",
+    name: "Away / after hours",
+    category: "Support",
+    body: "Thanks for your message, {name}. We are away right now and will reply as soon as we are back.",
+    versions: [],
+    tags: ["away"],
+  },
+];
+
+export async function addTemplateExamples(
+  workspaceId: string,
+  keys: string[]
+): Promise<TemplateJson[]> {
+  const chosen = TEMPLATE_EXAMPLES.filter((e) => keys.includes(e.key));
+  if (chosen.length === 0) throw new AppError(400, "Pick at least one example", "VALIDATION");
+  const out: TemplateJson[] = [];
+  for (const e of chosen) {
+    out.push(
+      await createTemplate(workspaceId, {
+        name: e.name,
+        category: e.category,
+        typeId: "text_message",
+        content: e.body,
+        versions: e.versions,
+        tags: e.tags,
+        variables: [{ key: "name", value: "" }],
+      })
+    );
+  }
+  return out;
 }

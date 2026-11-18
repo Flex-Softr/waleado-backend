@@ -529,7 +529,8 @@ export async function dispatchCallResponderRulesForCall(
         ) {
           content = await buildTemplateWhatsAppContent(
             workspaceId,
-            matchingRule.template
+            matchingRule.template,
+            { name: contactName || null, phone: toPhone }
           );
           textSummary =
             matchingRule.template.body ||

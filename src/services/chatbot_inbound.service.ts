@@ -9,6 +9,7 @@ import {
   withDeviceOutboundGate,
 } from "../lib/wa-device-outbound-gate";
 import { buildTemplateWhatsAppContent } from "./wa-outbound-content";
+import { templateContextFor } from "./template_context.service";
 import { generateOpenAiReply } from "./openai_auto_reply.service";
 import { resolveAiSettingsToOpenAiInput } from "./ai_credential_resolve.service";
 import {
@@ -211,10 +212,18 @@ async function sendMessageNode(
         name: true,
         media: true,
         footer: true,
+        versions: true,
+        variables: true,
       },
     });
     if (!tpl) return false;
-    const content = await buildTemplateWhatsAppContent(workspaceId, tpl);
+    const phoneMatch = toJid.match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/);
+    const ctx = await templateContextFor(
+      workspaceId,
+      phoneMatch ? `+${phoneMatch[1]}` : null,
+      deviceId
+    );
+    const content = await buildTemplateWhatsAppContent(workspaceId, tpl, ctx);
     await withDeviceOutboundGate(
       deviceId,
       { minGapMs: WA_DEVICE_INTERACTIVE_MIN_GAP_MS },

@@ -1,4 +1,10 @@
 import fs from "fs";
+import {
+  parseVariables,
+  pickVersion,
+  renderTemplateText,
+  type RenderContext,
+} from "../lib/template-render";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 import type { Prisma } from "@prisma/client";
 
@@ -91,15 +97,40 @@ export type TemplateRowForSend = {
   name: string;
   media: Prisma.JsonValue | null;
   footer: string | null;
+  /** Alternate wordings; one version is picked at random per send. */
+  versions?: string[] | null;
+  /** Custom variables and built-in fallbacks. */
+  variables?: Prisma.JsonValue | null;
 };
+
+/**
+ * Picks one of the template's versions and fills its variables for this recipient.
+ * Use the returned body/footer for anything that records what was sent.
+ */
+export function resolveTemplateForSend<T extends TemplateRowForSend>(
+  tpl: T,
+  ctx: RenderContext = {}
+): T {
+  const vars = parseVariables(tpl.variables ?? null);
+  const picked = pickVersion(tpl.body, tpl.versions ?? []);
+  return {
+    ...tpl,
+    body: picked === null ? null : renderTemplateText(picked, vars, ctx),
+    footer: tpl.footer === null ? null : renderTemplateText(tpl.footer, vars, ctx),
+  };
+}
 
 /**
  * Maps a DB message template to Baileys `sendMessage` content (text, image, video, etc.).
  */
 export async function buildTemplateWhatsAppContent(
   workspaceId: string,
-  tpl: TemplateRowForSend
+  rawTpl: TemplateRowForSend,
+  ctx: RenderContext = {},
+  /** Set when the caller already resolved the version (so its summary matches what is sent). */
+  alreadyResolved = false
 ): Promise<AnyMessageContent> {
+  const tpl = alreadyResolved ? rawTpl : resolveTemplateForSend(rawTpl, ctx);
   const caption = captionFromTemplate(tpl.body, tpl.footer);
   const textFallback = tpl.body?.trim() || " ";
   const typeRaw = tpl.typeId;

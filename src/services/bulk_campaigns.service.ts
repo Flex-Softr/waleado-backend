@@ -2275,7 +2275,7 @@ async function executeCampaignDispatch(args: ExecuteCampaignArgs): Promise<Execu
               attachmentType,
               attachmentAssetId
             )
-          : await buildTemplateWhatsAppContent(workspaceId, templateRow!);
+          : await buildTemplateWhatsAppContent(workspaceId, templateRow!, { phone: toPhone });
 
       const followUpText =
         kind === OutboundKind.TEMPLATE && templateRow?.typeId === "message_audio"
