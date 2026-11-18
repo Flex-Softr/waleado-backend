@@ -44,3 +44,12 @@ export function isWithinSendWindow(
 export function randomSendGapMs(random: () => number = Math.random): number {
   return 3_000 + Math.floor(random() * 5_000);
 }
+
+/**
+ * Fills {name} in a follow-up text. Without a known name the placeholder and the space before it
+ * are dropped, so "Hi {name}, any questions?" becomes "Hi, any questions?".
+ */
+export function fillFollowUpPlaceholders(text: string, name: string | null | undefined): string {
+  const n = name?.trim();
+  return n ? text.replace(/\{name\}/gi, n) : text.replace(/\s*\{name\}/gi, "").trim();
+}

@@ -38,6 +38,7 @@ const patchBody = z
     stage: z.enum(LEAD_STAGES).optional(),
     followUpAt: z.string().datetime().nullable().optional(),
     followUpMessage: z.string().max(1500).nullable().optional(),
+    followUpTemplateId: z.string().uuid().nullable().optional(),
     followUpStatus: z.enum(["SCHEDULED", "CANCELED"]).optional(),
     needsHuman: z.boolean().optional(),
     manualLock: z.boolean().optional(),
@@ -86,7 +87,10 @@ const createBody = z.object({
   name: z.string().max(200).nullable().optional(),
   note: z.string().max(1000).nullable().optional(),
   followUpAt: z.string().datetime(),
-  followUpMessage: z.string().min(1).max(1500),
+  followUpMessage: z.string().max(1500).nullable().optional(),
+  followUpTemplateId: z.string().uuid().nullable().optional(),
+}).refine((b) => Boolean(b.followUpMessage?.trim()) || Boolean(b.followUpTemplateId), {
+  message: "Write a message or pick a template",
 });
 
 router.post(
@@ -135,6 +139,7 @@ router.patch(
             ? null
             : new Date(body.followUpAt),
       followUpMessage: body.followUpMessage,
+      followUpTemplateId: body.followUpTemplateId,
       followUpStatus: body.followUpStatus,
       needsHuman: body.needsHuman,
       manualLock: body.manualLock,

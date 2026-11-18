@@ -148,6 +148,49 @@ describe("manual follow-ups", () => {
     expect(await prisma.conversationFollowUp.count()).toBe(0);
   });
 
+  it("uses a saved template: summary from its body, cleared when going back to text", async () => {
+    const ws = await createWorkspace();
+    const deviceId = await createDevice(ws.id);
+    const tpl = await prisma.messageTemplate.create({
+      data: {
+        workspaceId: ws.id,
+        name: "Hosting offer",
+        waTemplateName: "hosting_offer",
+        body: "Our hosting starts at 99 Tk",
+        typeId: "message_image",
+      },
+    });
+
+    const { item } = await createManualFollowUp(ws.id, {
+      deviceId,
+      phone: "+8801712345678",
+      followUpAt: inDays(2),
+      followUpTemplateId: tpl.id,
+    });
+    expect(item.followUpTemplateId).toBe(tpl.id);
+    expect(item.followUpMessage).toBe("Our hosting starts at 99 Tk");
+
+    const back = await updateFollowUp(ws.id, item.id, {
+      followUpTemplateId: null,
+      followUpMessage: "Plain text now",
+    });
+    expect(back.followUpTemplateId).toBeNull();
+    expect(back.followUpMessage).toBe("Plain text now");
+
+    await prisma.messageTemplate.update({ where: { id: tpl.id }, data: { active: false } });
+    await expect(
+      updateFollowUp(ws.id, item.id, { followUpTemplateId: tpl.id })
+    ).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("requires a message or a template", async () => {
+    const ws = await createWorkspace();
+    const deviceId = await createDevice(ws.id);
+    await expect(
+      createManualFollowUp(ws.id, { deviceId, phone: "+8801712345678", followUpAt: inDays(1) })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
   it("defaults to suggest mode and saves the AI mode", async () => {
     const ws = await createWorkspace();
     expect((await getFollowUpSettings(ws.id)).aiMode).toBe("SUGGEST");

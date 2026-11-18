@@ -19,10 +19,12 @@ import {
   type TranscriptLine,
 } from "../lib/followup-analysis";
 import {
+  fillFollowUpPlaceholders,
   isValidTimezone,
   isWithinSendWindow,
   randomSendGapMs,
 } from "../lib/followup-schedule";
+import { requireActiveTemplate } from "./templates.service";
 import { hasHumanRepliedRecently } from "./auto_reply_inbound.service";
 import { validateAndFormatPhone } from "../lib/phone";
 import {
@@ -55,6 +57,8 @@ export type FollowUpJson = {
   note: string;
   followUpAt: string | null;
   followUpMessage: string | null;
+  /** Saved template sent instead of plain text (keeps its media and buttons). */
+  followUpTemplateId: string | null;
   followUpsSent: number;
   lastFollowUpSentAt: string | null;
   lastConversationAt: string;
@@ -78,6 +82,7 @@ function toJson(r: ConversationFollowUp): FollowUpJson {
     note: r.note ?? "",
     followUpAt: r.followUpAt?.toISOString() ?? null,
     followUpMessage: r.followUpMessage,
+    followUpTemplateId: r.followUpTemplateId,
     followUpsSent: r.followUpsSent,
     lastFollowUpSentAt: r.lastFollowUpSentAt?.toISOString() ?? null,
     lastConversationAt: r.lastConversationAt.toISOString(),
@@ -204,6 +209,8 @@ export type UpdateFollowUpInput = {
   stage?: LeadStage;
   followUpAt?: Date | null;
   followUpMessage?: string | null;
+  /** Send a saved template instead of the text; null goes back to plain text. */
+  followUpTemplateId?: string | null;
   followUpStatus?: "SCHEDULED" | "CANCELED";
   needsHuman?: boolean;
   /** true = owner controls the plan; false = hand the plan back to the AI. */
@@ -234,6 +241,18 @@ export async function updateFollowUp(
     const t = input.followUpMessage?.trim() ?? "";
     data.followUpMessage = t ? t.slice(0, 1500) : null;
   }
+  if (input.followUpTemplateId !== undefined) {
+    if (input.followUpTemplateId) {
+      const tpl = await requireActiveTemplate(workspaceId, input.followUpTemplateId);
+      data.followUpTemplateId = tpl.id;
+      // Keep a readable summary of what will be sent for the list and the review page.
+      if (data.followUpMessage === undefined) {
+        data.followUpMessage = templateSummary(tpl);
+      }
+    } else {
+      data.followUpTemplateId = null;
+    }
+  }
   if (input.needsHuman !== undefined) data.needsHuman = input.needsHuman;
   if (input.note !== undefined) {
     data.note = input.note?.trim().slice(0, 1000) || null;
@@ -244,7 +263,9 @@ export async function updateFollowUp(
     input.followUpAt !== undefined &&
     (input.followUpAt?.getTime() ?? null) !== (existing.followUpAt?.getTime() ?? null);
   const messageChanged =
-    data.followUpMessage !== undefined && data.followUpMessage !== existing.followUpMessage;
+    (data.followUpMessage !== undefined && data.followUpMessage !== existing.followUpMessage) ||
+    (data.followUpTemplateId !== undefined &&
+      data.followUpTemplateId !== existing.followUpTemplateId);
   if (input.manualLock === false) {
     data.manualLock = false;
     // Let the next analysis run re-plan this contact.
@@ -266,8 +287,12 @@ export async function updateFollowUp(
       data.followUpMessage !== undefined
         ? (data.followUpMessage as string | null)
         : existing.followUpMessage;
-    if (!at || !msg) {
-      throw new AppError(400, "A follow-up needs a date and a message", "VALIDATION");
+    const tplId =
+      data.followUpTemplateId !== undefined
+        ? (data.followUpTemplateId as string | null)
+        : existing.followUpTemplateId;
+    if (!at || (!msg && !tplId)) {
+      throw new AppError(400, "A follow-up needs a date and a message or template", "VALIDATION");
     }
     if (!existing.peerPhone) {
       throw new AppError(400, "This contact has no phone number to message", "VALIDATION");
@@ -279,13 +304,20 @@ export async function updateFollowUp(
   return toJson(row);
 }
 
+function templateSummary(tpl: { name: string; body: string | null }): string {
+  const body = tpl.body?.trim();
+  return (body || `Template: ${tpl.name}`).slice(0, 1500);
+}
+
 export type CreateManualFollowUpInput = {
   deviceId: string;
   phone: string;
   name?: string | null;
   note?: string | null;
   followUpAt: Date;
-  followUpMessage: string;
+  /** Plain text (may contain {name}). Optional when a template is chosen. */
+  followUpMessage?: string | null;
+  followUpTemplateId?: string | null;
 };
 
 /**
@@ -301,8 +333,12 @@ export async function createManualFollowUp(
     throw new AppError(400, phone.message, "INVALID_PHONE");
   }
   const peerPhone = phone.e164.startsWith("+") ? phone.e164 : `+${phone.e164}`;
-  const message = input.followUpMessage.trim().slice(0, 1500);
-  if (!message) throw new AppError(400, "Write the follow-up message", "VALIDATION");
+  const tpl = input.followUpTemplateId
+    ? await requireActiveTemplate(workspaceId, input.followUpTemplateId)
+    : null;
+  const typed = input.followUpMessage?.trim().slice(0, 1500) ?? "";
+  const message = tpl ? typed || templateSummary(tpl) : typed;
+  if (!message) throw new AppError(400, "Write the follow-up message or pick a template", "VALIDATION");
   if (Number.isNaN(input.followUpAt.getTime())) {
     throw new AppError(400, "Pick a follow-up date", "VALIDATION");
   }
@@ -339,6 +375,7 @@ export async function createManualFollowUp(
     followUpStatus: "SCHEDULED" as const,
     followUpAt: input.followUpAt,
     followUpMessage: message,
+    followUpTemplateId: tpl?.id ?? null,
     manualLock: true,
     plannedAt: now,
     // A fresh manual plan starts its own count of unanswered follow-ups.
@@ -402,15 +439,28 @@ async function deliverFollowUp(row: ConversationFollowUp): Promise<ConversationF
   if (!row.peerPhone) {
     throw new AppError(400, "This contact has no phone number to message", "VALIDATION");
   }
-  const text = row.followUpMessage?.trim();
-  if (!text) throw new AppError(400, "Write the follow-up message first", "VALIDATION");
-
-  const outbound = await messaging.sendSingleMessage(row.workspaceId, {
-    deviceId: row.deviceId,
-    toPhone: row.peerPhone,
-    kind: "text",
-    bodyText: text,
-  });
+  let outbound: Awaited<ReturnType<typeof messaging.sendSingleMessage>>;
+  let text: string;
+  if (row.followUpTemplateId) {
+    // Saved template: sent exactly as designed (media, buttons, footer).
+    outbound = await messaging.sendSingleMessage(row.workspaceId, {
+      deviceId: row.deviceId,
+      toPhone: row.peerPhone,
+      kind: "template",
+      templateId: row.followUpTemplateId,
+    });
+    text = row.followUpMessage?.trim() || "(template message)";
+  } else {
+    const raw = row.followUpMessage?.trim();
+    if (!raw) throw new AppError(400, "Write the follow-up message first", "VALIDATION");
+    text = fillFollowUpPlaceholders(raw, row.peerLabel);
+    outbound = await messaging.sendSingleMessage(row.workspaceId, {
+      deviceId: row.deviceId,
+      toPhone: row.peerPhone,
+      kind: "text",
+      bodyText: text,
+    });
+  }
 
   const now = new Date();
   try {
@@ -548,6 +598,7 @@ type PlanResult = {
     followUpStatus: "SCHEDULED" | "SUGGESTED" | "NONE" | "CANCELED";
     followUpAt: Date | null;
     followUpMessage: string | null;
+    followUpTemplateId: null;
   };
 };
 
@@ -603,11 +654,13 @@ async function planFollowUp(args: {
           stretchDays(result.followUpDays!, args.sentSoFar, args.settings.maxDays)
         ),
         followUpMessage: result.followUpMessage,
+        followUpTemplateId: null,
       }
     : {
         followUpStatus: closed ? ("CANCELED" as const) : ("NONE" as const),
         followUpAt: null,
         followUpMessage: null,
+        followUpTemplateId: null,
       };
   return { label, result, stage, planned };
 }

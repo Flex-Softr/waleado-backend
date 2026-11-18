@@ -242,11 +242,17 @@ model Workspace {
    * Tier owned for life. When a timed plan above it expires, the workspace falls back here instead of FREE.
    */
   lifetimeTier           Plan?
-  /** Prepaid balance (BDT). Mirrors the sum of WalletTransaction rows. */
+  /**
+   * Prepaid balance (BDT). Mirrors the sum of WalletTransaction rows.
+   */
   walletBalance          Decimal                 @default(0) @db.Decimal(12, 2)
-  /** Renew the running plan from the wallet when it ends. */
+  /**
+   * Renew the running plan from the wallet when it ends.
+   */
   autoRenew              Boolean                 @default(false)
-  /** "Forever" coupon locked in on first use; applied to later renewals. */
+  /**
+   * "Forever" coupon locked in on first use; applied to later renewals.
+   */
   recurringCouponId      String?
   recurringCoupon        Coupon?                 @relation(fields: [recurringCouponId], references: [id], onDelete: SetNull)
   createdAt              DateTime                @default(now())
@@ -281,19 +287,19 @@ model Workspace {
  * Raw secret is shown once at creation; only the hash is stored.
  */
 model ApiCredential {
-  id                 String     @id @default(uuid())
+  id                 String    @id @default(uuid())
   workspaceId        String
-  workspace          Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   name               String
-  clientId           String     @unique
+  clientId           String    @unique
   clientSecretHash   String
   clientSecretPrefix String
-  active             Boolean    @default(true)
+  active             Boolean   @default(true)
   lastUsedAt         DateTime?
   revokedAt          DateTime?
   createdByUserId    String?
-  createdAt          DateTime   @default(now())
-  updatedAt          DateTime   @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@index([workspaceId])
   @@index([clientId])
@@ -333,7 +339,9 @@ model Device {
   status                 DeviceStatus            @default(QR_READY)
   phone                  String?
   profilePictureUrl      String?
-  /** Workspace default device used by Open API single send when deviceId is omitted. */
+  /**
+   * Workspace default device used by Open API single send when deviceId is omitted.
+   */
   isDefault              Boolean                 @default(false)
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
@@ -344,8 +352,9 @@ model Device {
   chatbotFlows           ChatbotFlow[]
   liveChatThreads        LiveChatThread[]
 
-  aiConversations        AiConversation[]
-  conversationFollowUps  ConversationFollowUp[]
+  aiConversations       AiConversation[]
+  conversationFollowUps ConversationFollowUp[]
+
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
 }
@@ -499,49 +508,49 @@ model LiveChatMessage {
 }
 
 model AutoReplyRule {
-  id              String               @id @default(uuid())
-  workspaceId     String
-  workspace       Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  deviceId        String
-  device          Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  name            String
+  id                  String               @id @default(uuid())
+  workspaceId         String
+  workspace           Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deviceId            String
+  device              Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  name                String
   /**
    * One or more triggers (comma / newline / ; / | separated). Semantics depend on triggerType.
    */
-  keyword         String               @db.Text
-  triggerType     AutoReplyTriggerType @default(CONTAINS)
-  caseSensitive   Boolean              @default(false)
-  priority        Int                  @default(100)
-  cooldownMinutes Int                  @default(0)
-  messageMode     AutoReplyMessageMode @default(TEXT)
-  templateId      String?
-  template        MessageTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  mediaAssetId    String?
-  mediaAsset      TemplateMediaAsset?  @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
-  mediaCaption    String?              @db.Text
-  response        String               @db.Text
-  openAiEnabled   Boolean              @default(false)
+  keyword             String               @db.Text
+  triggerType         AutoReplyTriggerType @default(CONTAINS)
+  caseSensitive       Boolean              @default(false)
+  priority            Int                  @default(100)
+  cooldownMinutes     Int                  @default(0)
+  messageMode         AutoReplyMessageMode @default(TEXT)
+  templateId          String?
+  template            MessageTemplate?     @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  mediaAssetId        String?
+  mediaAsset          TemplateMediaAsset?  @relation(fields: [mediaAssetId], references: [id], onDelete: SetNull)
+  mediaCaption        String?              @db.Text
+  response            String               @db.Text
+  openAiEnabled       Boolean              @default(false)
   /**
    * Preferred: credentialId + model (+ systemPrompt, temperature, maxTokens, continuousChat).
    * Legacy: apiKey + model + baseUrl (+ same optionals).
    */
-  openAiSettings  Json?
-  aiSkillId       String?
-  aiSkill         AiSkill?             @relation(fields: [aiSkillId], references: [id], onDelete: SetNull)
+  openAiSettings      Json?
+  aiSkillId           String?
+  aiSkill             AiSkill?             @relation(fields: [aiSkillId], references: [id], onDelete: SetNull)
   /**
    * AI rules only: after this rule's AI replies, keep answering that contact without keywords
    * for this many hours (rolling, from the last AI reply). 0 disables continuous conversation.
    */
-  conversationHours   Int              @default(24)
+  conversationHours   Int                  @default(24)
   /**
    * AI rules only: answer private chats that match no keyword (new chats). Off by default.
    */
-  fallbackForNewChats Boolean          @default(false)
-  active          Boolean              @default(true)
-  responseCount   Int                  @default(0)
-  aiConversations AiConversation[]
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  fallbackForNewChats Boolean              @default(false)
+  active              Boolean              @default(true)
+  responseCount       Int                  @default(0)
+  aiConversations     AiConversation[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
 
   @@index([workspaceId])
   @@index([deviceId])
@@ -573,31 +582,32 @@ model CallResponderRule {
 }
 
 model MessageTemplate {
-  id                 String              @id @default(uuid())
-  workspaceId        String
-  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  name               String
-  waTemplateName     String
-  language           String              @default("en")
-  body               String?
-  category           String              @default("general")
-  typeId             String              @default("text_message")
-  footer             String?
-  buttons            Json?
+  id                    String                 @id @default(uuid())
+  workspaceId           String
+  workspace             Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name                  String
+  waTemplateName        String
+  language              String                 @default("en")
+  body                  String?
+  category              String                 @default("general")
+  typeId                String                 @default("text_message")
+  footer                String?
+  buttons               Json?
   /**
    * Type-specific payload: file refs, URLs, location, poll, list rows, etc.
    */
-  media              Json?
+  media                 Json?
   /**
    * When false, hidden from send/campaign pickers; existing automations may still reference the id.
    */
-  active             Boolean             @default(true)
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
-  outboundMessages   OutboundMessage[]
-  bulkCampaigns      BulkCampaign[]
-  autoReplyRules     AutoReplyRule[]
-  callResponderRules CallResponderRule[]
+  active                Boolean                @default(true)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  outboundMessages      OutboundMessage[]
+  bulkCampaigns         BulkCampaign[]
+  autoReplyRules        AutoReplyRule[]
+  callResponderRules    CallResponderRule[]
+  conversationFollowUps ConversationFollowUp[]
 
   @@unique([workspaceId, waTemplateName])
   @@index([workspaceId])
@@ -839,7 +849,6 @@ model Notification {
   @@map("notifications")
 }
 
-
 /**
  * Admin-editable package definition. One row per tier; name, limits and marketing copy live here
  * so pricing can change without a deploy.
@@ -848,36 +857,56 @@ model BillingPlan {
   tier       Plan        @id
   name       String
   tagline    String?
-  /** Shown on public pricing pages. */
+  /**
+   * Shown on public pricing pages.
+   */
   isPublic   Boolean     @default(true)
-  /** "Most popular" emphasis on pricing pages. */
+  /**
+   * "Most popular" emphasis on pricing pages.
+   */
   highlight  Boolean     @default(false)
   sortOrder  Int         @default(0)
-  /** PlanLimits JSON (quotas + feature flags). */
+  /**
+   * PlanLimits JSON (quotas + feature flags).
+   */
   limits     Json
-  /** Marketing bullet points (string[]). */
+  /**
+   * Marketing bullet points (string[]).
+   */
   highlights Json        @default("[]")
   updatedAt  DateTime    @default(now()) @updatedAt
   prices     PlanPrice[]
 }
 
-/** Price of a tier for a billing cycle. months = 0 means lifetime. */
+/**
+ * Price of a tier for a billing cycle. months = 0 means lifetime.
+ */
 model PlanPrice {
   id           String      @id @default(uuid())
   tier         Plan
   plan         BillingPlan @relation(fields: [tier], references: [tier], onDelete: Cascade)
   months       Int
   amountBdt    Decimal     @db.Decimal(12, 2)
-  /** Optional strike-through price shown next to the real one. */
+  /**
+   * Optional strike-through price shown next to the real one.
+   */
   compareAtBdt Decimal?    @db.Decimal(12, 2)
-  /** Optional USD price; Stripe is offered only when this is set. */
+  /**
+   * Optional USD price; Stripe is offered only when this is set.
+   */
   amountUsd    Decimal?    @db.Decimal(12, 2)
-  /** Badge such as "3 months free". */
+  /**
+   * Badge such as "3 months free".
+   */
   label        String?
   isActive     Boolean     @default(true)
-  /** Maximum number of paid sales (used for limited lifetime deals). */
+  /**
+   * Maximum number of paid sales (used for limited lifetime deals).
+   */
   saleCap      Int?
-  /** Stop selling after this moment. */
+  /**
+   * Stop selling after this moment.
+   */
   saleEndsAt   DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @default(now()) @updatedAt
@@ -885,65 +914,99 @@ model PlanPrice {
   @@unique([tier, months])
 }
 
-/** Single-row global billing settings (id = "default"). */
+/**
+ * Single-row global billing settings (id = "default").
+ */
 model BillingSettings {
-  id              String   @id @default("default")
-  /** Reverse trial: new workspaces get trialTier for this many days, then drop to FREE. */
-  trialDays       Int      @default(7)
-  trialTier       Plan     @default(PRO)
-  /** Days a lapsed paid plan keeps working before falling back. */
-  graceDays       Int      @default(3)
-  /** Appended to bulk text messages on plans without removeBranding. Empty disables it. */
-  brandingFooter  String?  @default("Sent via Waleado — waleado.app")
-  /** Create the renewal invoice this many days before a plan ends. */
-  renewalInvoiceDays Int     @default(7)
-  /** Send renewal reminders this many days before the end (0 = on the day). */
-  reminderDays       Int[]   @default([7, 3, 1, 0])
-  /** Warn when usage reaches these percentages of a limit. */
-  usageAlertPercents Int[]   @default([80, 100])
-  walletMinTopup     Decimal @default(100) @db.Decimal(12, 2)
-  walletMaxTopup     Decimal @default(100000) @db.Decimal(12, 2)
-  updatedAt       DateTime @default(now()) @updatedAt
+  id                 String   @id @default("default")
+  /**
+   * Reverse trial: new workspaces get trialTier for this many days, then drop to FREE.
+   */
+  trialDays          Int      @default(7)
+  trialTier          Plan     @default(PRO)
+  /**
+   * Days a lapsed paid plan keeps working before falling back.
+   */
+  graceDays          Int      @default(3)
+  /**
+   * Appended to bulk text messages on plans without removeBranding. Empty disables it.
+   */
+  brandingFooter     String?  @default("Sent via Waleado — waleado.app")
+  /**
+   * Create the renewal invoice this many days before a plan ends.
+   */
+  renewalInvoiceDays Int      @default(7)
+  /**
+   * Send renewal reminders this many days before the end (0 = on the day).
+   */
+  reminderDays       Int[]    @default([7, 3, 1, 0])
+  /**
+   * Warn when usage reaches these percentages of a limit.
+   */
+  usageAlertPercents Int[]    @default([80, 100])
+  walletMinTopup     Decimal  @default(100) @db.Decimal(12, 2)
+  walletMaxTopup     Decimal  @default(100000) @db.Decimal(12, 2)
+  updatedAt          DateTime @default(now()) @updatedAt
 }
 
 model Invoice {
-  id           String               @id @default(uuid())
-  number       String               @unique
-  workspaceId  String
-  workspace    Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  /** Null for wallet top-ups. */
-  tier         Plan?
-  /** 0 = lifetime (ignored for top-ups) */
-  months       Int
-  /** new | renewal | upgrade | topup */
-  kind         String
-  subtotal     Decimal              @db.Decimal(12, 2)
-  /** Coupon discount. */
-  discount     Decimal              @default(0) @db.Decimal(12, 2)
-  couponId     String?
-  coupon       Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
-  /** Proration credit from the plan being replaced. */
-  credit       Decimal              @default(0) @db.Decimal(12, 2)
-  /** Paid from the wallet (reserved when the invoice is created). */
-  walletAmount Decimal              @default(0) @db.Decimal(12, 2)
-  /** Left to pay through a gateway. */
-  total        Decimal              @db.Decimal(12, 2)
-  currency     String
-  /** unpaid | paid | cancelled */
-  status       String               @default("unpaid")
-  gateway      String?
-  description  String
-  periodStart  DateTime?
-  periodEnd    DateTime?
-  paidAt       DateTime?
-  /** Set when this period's unused value was turned into upgrade credit, so it is never credited twice. */
-  supersededAt DateTime?
-  /** External reference for manual payments (e.g. bKash TrxID). */
-  paymentRef   String?
-  note         String?
-  createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @default(now()) @updatedAt
-  payments     PaymentTransaction[]
+  id                 String               @id @default(uuid())
+  number             String               @unique
+  workspaceId        String
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  /**
+   * Null for wallet top-ups.
+   */
+  tier               Plan?
+  /**
+   * 0 = lifetime (ignored for top-ups)
+   */
+  months             Int
+  /**
+   * new | renewal | upgrade | topup
+   */
+  kind               String
+  subtotal           Decimal              @db.Decimal(12, 2)
+  /**
+   * Coupon discount.
+   */
+  discount           Decimal              @default(0) @db.Decimal(12, 2)
+  couponId           String?
+  coupon             Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  /**
+   * Proration credit from the plan being replaced.
+   */
+  credit             Decimal              @default(0) @db.Decimal(12, 2)
+  /**
+   * Paid from the wallet (reserved when the invoice is created).
+   */
+  walletAmount       Decimal              @default(0) @db.Decimal(12, 2)
+  /**
+   * Left to pay through a gateway.
+   */
+  total              Decimal              @db.Decimal(12, 2)
+  currency           String
+  /**
+   * unpaid | paid | cancelled
+   */
+  status             String               @default("unpaid")
+  gateway            String?
+  description        String
+  periodStart        DateTime?
+  periodEnd          DateTime?
+  paidAt             DateTime?
+  /**
+   * Set when this period's unused value was turned into upgrade credit, so it is never credited twice.
+   */
+  supersededAt       DateTime?
+  /**
+   * External reference for manual payments (e.g. bKash TrxID).
+   */
+  paymentRef         String?
+  note               String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @default(now()) @updatedAt
+  payments           PaymentTransaction[]
   walletTransactions WalletTransaction[]
   couponRedemption   CouponRedemption?
 
@@ -957,35 +1020,47 @@ enum CouponDiscountType {
 }
 
 enum CouponDuration {
-  /** Only the first payment that uses the code. */
+  /**
+   * Only the first payment that uses the code.
+   */
   ONCE
-  /** Locked in for the workspace and applied to every renewal. */
+  /**
+   * Locked in for the workspace and applied to every renewal.
+   */
   FOREVER
 }
 
 model Coupon {
-  id                 String             @id @default(uuid())
-  /** Stored upper-case. */
-  code               String             @unique
-  description        String?
-  discountType       CouponDiscountType
-  /** Percent (1-100) or BDT amount. */
-  discountValue      Decimal            @db.Decimal(12, 2)
-  duration           CouponDuration     @default(ONCE)
-  /** Empty = all paid plans. */
-  tiers              Plan[]             @default([])
-  /** Billing cycles in months (0 = lifetime). Empty = all. */
-  cycles             Int[]              @default([])
-  maxRedemptions     Int?
-  perWorkspaceLimit  Int                @default(1)
-  startsAt           DateTime?
-  expiresAt          DateTime?
-  isActive           Boolean            @default(true)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @default(now()) @updatedAt
-  redemptions        CouponRedemption[]
-  invoices           Invoice[]
-  lockedWorkspaces   Workspace[]
+  id                String             @id @default(uuid())
+  /**
+   * Stored upper-case.
+   */
+  code              String             @unique
+  description       String?
+  discountType      CouponDiscountType
+  /**
+   * Percent (1-100) or BDT amount.
+   */
+  discountValue     Decimal            @db.Decimal(12, 2)
+  duration          CouponDuration     @default(ONCE)
+  /**
+   * Empty = all paid plans.
+   */
+  tiers             Plan[]             @default([])
+  /**
+   * Billing cycles in months (0 = lifetime). Empty = all.
+   */
+  cycles            Int[]              @default([])
+  maxRedemptions    Int?
+  perWorkspaceLimit Int                @default(1)
+  startsAt          DateTime?
+  expiresAt         DateTime?
+  isActive          Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @default(now()) @updatedAt
+  redemptions       CouponRedemption[]
+  invoices          Invoice[]
+  lockedWorkspaces  Workspace[]
 }
 
 model CouponRedemption {
@@ -1003,40 +1078,56 @@ model CouponRedemption {
   @@index([workspaceId])
 }
 
-/** Ledger of wallet changes; amount is positive for credits, negative for debits. */
+/**
+ * Ledger of wallet changes; amount is positive for credits, negative for debits.
+ */
 model WalletTransaction {
   id           String    @id @default(uuid())
   workspaceId  String
   workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   amount       Decimal   @db.Decimal(12, 2)
   balanceAfter Decimal   @db.Decimal(12, 2)
-  /** topup | invoice_payment | invoice_refund | adjustment */
+  /**
+   * topup | invoice_payment | invoice_refund | adjustment
+   */
   type         String
   invoiceId    String?
   invoice      Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
   note         String?
-  /** Admin who made a manual adjustment. */
+  /**
+   * Admin who made a manual adjustment.
+   */
   actorUserId  String?
   createdAt    DateTime  @default(now())
 
   @@index([workspaceId, createdAt])
 }
 
-/** Single-row platform settings for system messages and abuse protection (id = "default"). */
+/**
+ * Single-row platform settings for system messages and abuse protection (id = "default").
+ */
 model SystemSettings {
   id                       String   @id @default("default")
-  /** Admin-workspace device that sends system WhatsApp messages (OTP, reminders). */
+  /**
+   * Admin-workspace device that sends system WhatsApp messages (OTP, reminders).
+   */
   senderDeviceId           String?
   emailEnabled             Boolean  @default(true)
   whatsappEnabled          Boolean  @default(true)
-  /** New accounts must confirm a WhatsApp number before using the dashboard. */
+  /**
+   * New accounts must confirm a WhatsApp number before using the dashboard.
+   */
   requirePhoneVerification Boolean  @default(true)
-  /** Disconnect Free-plan devices idle this many days (0 = never). */
+  /**
+   * Disconnect Free-plan devices idle this many days (0 = never).
+   */
   idleFreeDeviceDays       Int      @default(30)
   updatedAt                DateTime @default(now()) @updatedAt
 }
 
-/** Admin overrides of built-in message templates (defaults live in code). */
+/**
+ * Admin overrides of built-in message templates (defaults live in code).
+ */
 model NotificationTemplate {
   key             String   @id
   whatsappBody    String?  @db.Text
@@ -1047,13 +1138,17 @@ model NotificationTemplate {
   updatedAt       DateTime @default(now()) @updatedAt
 }
 
-/** Prevents sending the same scheduled message twice. */
+/**
+ * Prevents sending the same scheduled message twice.
+ */
 model NotificationLog {
   id          String   @id @default(uuid())
   dedupeKey   String   @unique
   workspaceId String?
   templateKey String
-  /** Per-channel outcome, e.g. { "email": "sent", "whatsapp": "skipped" }. */
+  /**
+   * Per-channel outcome, e.g. { "email": "sent", "whatsapp": "skipped" }.
+   */
   result      Json?
   createdAt   DateTime @default(now())
 
@@ -1075,7 +1170,9 @@ model PhoneOtp {
   @@index([phone, createdAt])
 }
 
-/** Who changed what in billing from the admin panel. */
+/**
+ * Who changed what in billing from the admin panel.
+ */
 model BillingAuditLog {
   id          String   @id @default(uuid())
   workspaceId String?
@@ -1102,7 +1199,9 @@ model AiConversation {
   workspace      Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deviceId       String
   device         Device               @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  /** Phone (E.164-like) when known, otherwise lower-cased JID. */
+  /**
+   * Phone (E.164-like) when known, otherwise lower-cased JID.
+   */
   peerKey        String
   ruleId         String
   rule           AutoReplyRule        @relation(fields: [ruleId], references: [id], onDelete: Cascade)
@@ -1152,66 +1251,103 @@ enum FollowUpSource {
  * and the planned follow-up (date + message). Reviewed daily on the follow-ups page.
  */
 model ConversationFollowUp {
-  id                 String         @id @default(uuid())
+  id                 String           @id @default(uuid())
   workspaceId        String
-  workspace          Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace          Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   deviceId           String
-  device             Device         @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-  /** Same key as AiConversation.peerKey (phone, else JID). */
+  device             Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /**
+   * Same key as AiConversation.peerKey (phone, else JID).
+   */
   peerKey            String
-  /** Set only when a phone number is known; required to send a follow-up. */
+  /**
+   * Set only when a phone number is known; required to send a follow-up.
+   */
   peerPhone          String?
-  /** AutoReplyRule that handled the conversation (used to pick the AI credential). */
+  /**
+   * AutoReplyRule that handled the conversation (used to pick the AI credential).
+   */
   ruleId             String?
-  /** Who put this contact in the list. */
-  source             FollowUpSource @default(AI)
-  /** Owner controls the plan: the AI never changes its date or message. */
-  manualLock         Boolean        @default(false)
-  /** Owner's private note about this contact. */
-  note               String?        @db.Text
-  /** When the current plan (date + message) was set by the owner. */
+  /**
+   * Who put this contact in the list.
+   */
+  source             FollowUpSource   @default(AI)
+  /**
+   * Owner controls the plan: the AI never changes its date or message.
+   */
+  manualLock         Boolean          @default(false)
+  /**
+   * Owner's private note about this contact.
+   */
+  note               String?          @db.Text
+  /**
+   * When the current plan (date + message) was set by the owner.
+   */
   plannedAt          DateTime?
-  peerLabel          String         @default("")
-  stage              LeadStage      @default(NEW)
-  summary            String         @default("") @db.Text
-  needsHuman         Boolean        @default(false)
-  followUpStatus     FollowUpStatus @default(NONE)
+  peerLabel          String           @default("")
+  stage              LeadStage        @default(NEW)
+  summary            String           @default("") @db.Text
+  needsHuman         Boolean          @default(false)
+  followUpStatus     FollowUpStatus   @default(NONE)
   followUpAt         DateTime?
-  followUpMessage    String?        @db.Text
-  followUpsSent      Int            @default(0)
+  followUpMessage    String?          @db.Text
+  /**
+   * When set, the follow-up sends this saved template (media, buttons…) instead of plain text.
+   */
+  followUpTemplateId String?
+  followUpTemplate   MessageTemplate? @relation(fields: [followUpTemplateId], references: [id], onDelete: SetNull)
+  followUpsSent      Int              @default(0)
   lastFollowUpSentAt DateTime?
-  /** Last time the contact and the AI talked (drives "today's conversations"). */
+  /**
+   * Last time the contact and the AI talked (drives "today's conversations").
+   */
   lastConversationAt DateTime
   analyzedAt         DateTime?
-  /** AiConversation.lastActivityAt that the latest analysis covered. */
+  /**
+   * AiConversation.lastActivityAt that the latest analysis covered.
+   */
   analyzedActivityAt DateTime?
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   @@unique([workspaceId, deviceId, peerKey])
   @@index([workspaceId, followUpStatus, followUpAt])
   @@index([workspaceId, lastConversationAt])
 }
 
-/** Per-workspace follow-up behaviour. Auto-send is off until the owner turns it on. */
+/**
+ * Per-workspace follow-up behaviour. Auto-send is off until the owner turns it on.
+ */
 model FollowUpSettings {
-  workspaceId         String    @id
-  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  autoSend            Boolean   @default(false)
+  workspaceId         String         @id
+  workspace           Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  autoSend            Boolean        @default(false)
   aiMode              FollowUpAiMode @default(SUGGEST)
-  /** IANA timezone used for the send window. */
-  timezone            String    @default("UTC")
-  windowStartHour     Int       @default(9)
-  windowEndHour       Int       @default(21)
-  /** Unanswered follow-ups per contact before the AI stops. */
-  maxFollowUps        Int       @default(3)
-  /** Safety cap: automatic follow-ups per device per 24 hours. */
-  dailyLimitPerDevice Int       @default(30)
-  /** Hours of silence before a conversation is analysed. */
-  idleHours           Int       @default(2)
-  /** Longest wait the AI may choose, in days. */
-  maxDays             Int       @default(30)
-  /** Owner's own guidance for the AI (when and how to follow up). */
-  instructions        String?   @db.Text
-  updatedAt           DateTime  @updatedAt
+  /**
+   * IANA timezone used for the send window.
+   */
+  timezone            String         @default("UTC")
+  windowStartHour     Int            @default(9)
+  windowEndHour       Int            @default(21)
+  /**
+   * Unanswered follow-ups per contact before the AI stops.
+   */
+  maxFollowUps        Int            @default(3)
+  /**
+   * Safety cap: automatic follow-ups per device per 24 hours.
+   */
+  dailyLimitPerDevice Int            @default(30)
+  /**
+   * Hours of silence before a conversation is analysed.
+   */
+  idleHours           Int            @default(2)
+  /**
+   * Longest wait the AI may choose, in days.
+   */
+  maxDays             Int            @default(30)
+  /**
+   * Owner's own guidance for the AI (when and how to follow up).
+   */
+  instructions        String?        @db.Text
+  updatedAt           DateTime       @updatedAt
 }
