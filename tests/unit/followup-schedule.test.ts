@@ -43,3 +43,14 @@ describe("randomSendGapMs", () => {
     expect(randomSendGapMs(() => 0.999)).toBeLessThan(8000);
   });
 });
+
+import { fillFollowUpPlaceholders } from "../../src/lib/followup-schedule";
+
+describe("fillFollowUpPlaceholders", () => {
+  it("fills or drops {name}", () => {
+    expect(fillFollowUpPlaceholders("Hi {name}, any questions?", "Rahim")).toBe("Hi Rahim, any questions?");
+    expect(fillFollowUpPlaceholders("Hi {name}, any questions?", "")).toBe("Hi, any questions?");
+    expect(fillFollowUpPlaceholders("{NAME} hello", null)).toBe("hello");
+    expect(fillFollowUpPlaceholders("No placeholder", "X")).toBe("No placeholder");
+  });
+});
